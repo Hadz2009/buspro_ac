@@ -101,6 +101,7 @@ class HdlAcClimate(ClimateEntity):
         self._last_state_change = 0  # Track when state actually changed
         self._pending_temp = None  # Track accepted temp to reject reverts
         self._pending_mode = None  # Track accepted mode to reject reverts
+        self._pending_is_on = None  # Track accepted on/off state to reject flips
         
         # Register callback for status updates
         self._gateway.register_callback(subnet, device_id, self._handle_status_update)
@@ -125,8 +126,8 @@ class HdlAcClimate(ClimateEntity):
     @property
     def hvac_modes(self):
         """Return the list of available HVAC modes."""
-        # Include OFF for state tracking, but UI will show separate power toggle
-        return [HVACMode.OFF, HVACMode.COOL, HVACMode.FAN_ONLY, HVACMode.DRY]
+        # Only COOL and FAN modes (removed DRY/dehumidify as requested)
+        return [HVACMode.OFF, HVACMode.COOL, HVACMode.FAN_ONLY]
 
     @property
     def supported_features(self):
@@ -166,7 +167,7 @@ class HdlAcClimate(ClimateEntity):
         """Set new target HVAC mode."""
         if hvac_mode == HVACMode.OFF:
             self.turn_off()
-        elif hvac_mode in [HVACMode.COOL, HVACMode.FAN_ONLY, HVACMode.DRY]:
+        elif hvac_mode in [HVACMode.COOL, HVACMode.FAN_ONLY]:
             self._hvac_mode = hvac_mode
             self.turn_on()
         else:
@@ -218,6 +219,7 @@ class HdlAcClimate(ClimateEntity):
             # Protect the values we're sending from being reverted
             self._pending_temp = self._target_temperature
             self._pending_mode = hdl_mode
+            self._pending_is_on = True  # Turning ON
             
             # Send via gateway
             success = self._gateway.send_packet(frame)
@@ -252,9 +254,10 @@ class HdlAcClimate(ClimateEntity):
             self._last_command_sent = time.time()
             self._last_state_change = time.time()
             
-            # Clear pending values when turning off
+            # Protect OFF state from being reverted
             self._pending_temp = None
             self._pending_mode = None
+            self._pending_is_on = False  # Turning OFF
             
             # Send via gateway
             success = self._gateway.send_packet(frame)
@@ -272,6 +275,7 @@ class HdlAcClimate(ClimateEntity):
     def _handle_status_update(self, status: dict):
         """
         Handle status update from gateway broadcast.
+        BULLETPROOF: Ignores stale broadcasts and revert attempts.
         
         Args:
             status: Dictionary with 'is_on', 'temperature', 'hvac_mode' keys
@@ -288,19 +292,25 @@ class HdlAcClimate(ClimateEntity):
         
         _LOGGER.info(f"🎯 Received status update for {self._name}: {status}")
         
-        # Check if this is a CHANGE from current state or a REVERT to old state
+        # Determine current is_on state from hvac_mode
+        current_is_on = self._hvac_mode != HVACMode.OFF
+        
+        # Check if this is a CHANGE from current state
         temp_changed = status['temperature'] is not None and status['temperature'] != self._target_temperature
+        is_on_changed = status['is_on'] is not None and status['is_on'] != current_is_on
         mode_changed = False
         
         if status['hvac_mode'] is not None:
             if status['hvac_mode'] == HVAC_MODE_COOL:
-                mode_changed = self._hvac_mode != HVACMode.COOL
+                mode_changed = self._hvac_mode != HVACMode.COOL and self._hvac_mode != HVACMode.OFF
             elif status['hvac_mode'] == HVAC_MODE_FAN:
-                mode_changed = self._hvac_mode != HVACMode.FAN_ONLY
+                mode_changed = self._hvac_mode != HVACMode.FAN_ONLY and self._hvac_mode != HVACMode.OFF
+            # Ignore DRY mode broadcasts since we removed it
             elif status['hvac_mode'] == HVAC_MODE_DRY:
-                mode_changed = self._hvac_mode != HVACMode.DRY
+                _LOGGER.debug(f"Ignoring DRY mode broadcast for {self._name} (mode not supported)")
+                return
         
-        is_change = temp_changed or mode_changed
+        is_change = temp_changed or mode_changed or is_on_changed
         
         # If we recently accepted a change (within 3 seconds), check if this is a revert
         if current_time - self._last_state_change < 3.0:
@@ -317,11 +327,17 @@ class HdlAcClimate(ClimateEntity):
                 status['hvac_mode'] != self._pending_mode
             )
             
-            if is_temp_revert or is_mode_revert:
+            is_on_revert = (
+                self._pending_is_on is not None and
+                status['is_on'] is not None and
+                status['is_on'] != self._pending_is_on
+            )
+            
+            if is_temp_revert or is_mode_revert or is_on_revert:
                 _LOGGER.warning(
                     f"🚫 REJECTING revert for {self._name}: "
-                    f"Broadcast trying to change temp={self._pending_temp}°C mode={self._pending_mode} "
-                    f"back to temp={status['temperature']}°C mode={status['hvac_mode']}. "
+                    f"Broadcast trying to change temp={self._pending_temp}°C mode={self._pending_mode} is_on={self._pending_is_on} "
+                    f"back to temp={status['temperature']}°C mode={status['hvac_mode']} is_on={status['is_on']}. "
                     f"Keeping user's change!"
                 )
                 return
@@ -335,6 +351,8 @@ class HdlAcClimate(ClimateEntity):
                 self._pending_temp = status['temperature']
             if mode_changed:
                 self._pending_mode = status['hvac_mode']
+            if is_on_changed:
+                self._pending_is_on = status['is_on']
         else:
             _LOGGER.debug(f"ℹ️ No change detected for {self._name}")
         
@@ -358,7 +376,9 @@ class HdlAcClimate(ClimateEntity):
                 elif status['hvac_mode'] == HVAC_MODE_FAN:
                     new_mode = HVACMode.FAN_ONLY
                 elif status['hvac_mode'] == HVAC_MODE_DRY:
-                    new_mode = HVACMode.DRY
+                    # Map DRY to COOL since we removed DRY mode
+                    new_mode = HVACMode.COOL
+                    _LOGGER.debug(f"Mapping DRY mode to COOL for {self._name}")
                 else:
                     new_mode = None  # Unknown mode
                 
