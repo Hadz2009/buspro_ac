@@ -90,23 +90,39 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     if entities:
         add_entities(entities, True)
         
-        # Request initial status for all ACs after a short delay
+        # Request initial status for all ACs after entities are initialized
         async def request_initial_status():
-            """Request status from all ACs with delays to avoid flooding."""
-            await asyncio.sleep(2)  # Wait 2 seconds for entities to fully initialize
+            """Request status from all ACs with delays and retries to ensure sync."""
+            # Wait longer for entities to fully initialize and register callbacks
+            await asyncio.sleep(5)
+            
+            _LOGGER.info(f"🔄 Starting initial status sync for {len(entities)} AC unit(s)...")
             
             for entity in entities:
                 try:
-                    _LOGGER.info(f"Requesting initial status for {entity.name}")
+                    _LOGGER.info(f"📡 Requesting initial status for {entity.name} ({entity._subnet}.{entity._device_id})")
+                    
+                    # Build and send status request
                     frame = build_status_request(
                         entity._subnet,
                         entity._device_id,
                         gateway.protocol_schema
                     )
+                    
+                    # Send request twice with delay to ensure it's received
                     gateway.send_packet(frame)
-                    await asyncio.sleep(0.1)  # 100ms delay between requests
+                    await asyncio.sleep(0.3)  # 300ms delay
+                    gateway.send_packet(frame)  # Send again for reliability
+                    
+                    _LOGGER.debug(f"✅ Status request sent for {entity.name}")
+                    
+                    # Delay between different devices
+                    await asyncio.sleep(0.5)
+                    
                 except Exception as e:
-                    _LOGGER.error(f"Failed to request status for {entity.name}: {e}")
+                    _LOGGER.error(f"❌ Failed to request status for {entity.name}: {e}")
+            
+            _LOGGER.info(f"✅ Initial status sync complete - waiting for device responses...")
         
         # Schedule the status request task
         hass.async_create_task(request_initial_status())
