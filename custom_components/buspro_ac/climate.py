@@ -270,34 +270,28 @@ class HdlAcClimate(ClimateEntity):
         # Ignore status updates that come within 2 seconds of sending a command
         # (prevents feedback loop where our command triggers a broadcast that overwrites our change)
         if current_time - self._last_command_sent < 2.0:
-            _LOGGER.warning(f"⏭️ Ignoring status update (within 2s of command) for {self._name}")
+            _LOGGER.debug(f"⏭️ Ignoring status update (within 2s of command) for {self._name}")
             return
         
-        _LOGGER.warning(f"🎯 Status update for {self._name}: {status}")
-        _LOGGER.warning(f"   Current state: mode={self._hvac_mode}, temp={self._target_temperature}")
+        # Ignore duplicate updates that come too quickly (debounce within 0.3 seconds)
+        # This prevents rapid-fire broadcasts from causing state flipping
+        if current_time - self._last_status_update < 0.3:
+            _LOGGER.debug(f"⏭️ Ignoring rapid duplicate for {self._name} (debounce)")
+            return
         
-        # Store pending updates temporarily
-        self._pending_temp = status.get('temperature')
-        self._pending_mode = status.get('hvac_mode')
+        _LOGGER.info(f"🎯 Status update for {self._name}: {status}")
+        
+        # Update timestamp BEFORE applying to prevent race conditions
         self._last_status_update = current_time
         
-        # Apply updates after a short delay (0.5 seconds) to allow multiple rapid
-        # broadcasts to settle on the final value
-        import threading
-        def apply_update():
-            time.sleep(0.5)
-            # Only apply if no newer update has arrived
-            if current_time == self._last_status_update:
-                self._apply_status_update(status)
-        
-        threading.Thread(target=apply_update, daemon=True).start()
+        # Apply the update immediately (no threading delay)
+        self._apply_status_update(status)
     
     def _apply_status_update(self, status: dict):
-        """Apply the status update after debounce delay."""
-        _LOGGER.warning(f"📝 Applying status update for {self._name}: {status}")
-        
+        """Apply the status update immediately."""
         try:
             updated = False
+            changes = []
             
             # Update HVAC mode first (if available, regardless of is_on state)
             if status['hvac_mode'] is not None:
@@ -320,14 +314,14 @@ class HdlAcClimate(ClimateEntity):
                             old_mode = self._hvac_mode
                             self._hvac_mode = new_mode
                             updated = True
-                            _LOGGER.warning(f"✅ {self._name}: Mode {old_mode} → {new_mode}")
+                            changes.append(f"mode: {old_mode} → {new_mode}")
                     elif status['is_on'] is False:
                         # AC is OFF
                         if self._hvac_mode != HVACMode.OFF:
                             old_mode = self._hvac_mode
                             self._hvac_mode = HVACMode.OFF
                             updated = True
-                            _LOGGER.warning(f"✅ {self._name}: Turned OFF (was {old_mode})")
+                            changes.append(f"mode: {old_mode} → OFF")
                     else:
                         # is_on is None but we have a mode - AC is probably ON
                         # Apply the mode change regardless of current state
@@ -335,14 +329,14 @@ class HdlAcClimate(ClimateEntity):
                             old_mode = self._hvac_mode
                             self._hvac_mode = new_mode
                             updated = True
-                            _LOGGER.warning(f"✅ {self._name}: Mode {old_mode} → {new_mode} (inferred from mode)")
+                            changes.append(f"mode: {old_mode} → {new_mode}")
             elif status['is_on'] is False:
                 # No mode but explicitly OFF
                 if self._hvac_mode != HVACMode.OFF:
                     old_mode = self._hvac_mode
                     self._hvac_mode = HVACMode.OFF
                     updated = True
-                    _LOGGER.warning(f"✅ {self._name}: Turned OFF (was {old_mode})")
+                    changes.append(f"mode: {old_mode} → OFF")
             
             # Update temperature (always accept temperature changes)
             if status['temperature'] is not None:
@@ -350,16 +344,15 @@ class HdlAcClimate(ClimateEntity):
                     old_temp = self._target_temperature
                     self._target_temperature = status['temperature']
                     updated = True
-                    _LOGGER.warning(f"✅ {self._name}: Temp {old_temp}°C → {status['temperature']}°C")
+                    changes.append(f"temp: {old_temp}°C → {status['temperature']}°C")
             
             # If anything changed, update Home Assistant
             if updated:
-                _LOGGER.warning(f"🔄 Scheduling state update for {self._name}")
+                _LOGGER.info(f"✅ {self._name} updated: {', '.join(changes)}")
                 self.schedule_update_ha_state()
-                _LOGGER.warning(f"✅ State update scheduled for {self._name}")
             else:
-                _LOGGER.warning(f"ℹ️ No changes for {self._name} (already in sync)")
+                _LOGGER.debug(f"No changes for {self._name} (already in sync)")
                 
         except Exception as e:
-            _LOGGER.error(f"❌ Error handling status update for {self._name}: {e}", exc_info=True)
+            _LOGGER.error(f"Error handling status update for {self._name}: {e}", exc_info=True)
 
