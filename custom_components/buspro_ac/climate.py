@@ -94,6 +94,9 @@ class HdlAcClimate(ClimateEntity):
         self._attr_max_temp = 30
         self._attr_target_temperature_step = 1
         
+        # Register callback for status updates
+        self._gateway.register_callback(subnet, device_id, self._handle_status_update)
+        
         _LOGGER.debug(
             f"Initialized HDL AC: {name} (subnet={subnet}, device={device_id})"
         )
@@ -241,4 +244,52 @@ class HdlAcClimate(ClimateEntity):
                 
         except Exception as e:
             _LOGGER.error(f"Error turning OFF {self._name}: {e}")
+    
+    def _handle_status_update(self, status: dict):
+        """
+        Handle status update from gateway broadcast.
+        
+        Args:
+            status: Dictionary with 'is_on', 'temperature', 'hvac_mode' keys
+        """
+        try:
+            updated = False
+            
+            # Update ON/OFF state
+            if status['is_on'] is not None:
+                if status['is_on']:
+                    # AC is ON - determine mode
+                    if status['hvac_mode'] == HVAC_MODE_COOL:
+                        new_mode = HVACMode.COOL
+                    elif status['hvac_mode'] == HVAC_MODE_FAN:
+                        new_mode = HVACMode.FAN_ONLY
+                    elif status['hvac_mode'] == HVAC_MODE_DRY:
+                        new_mode = HVACMode.DRY
+                    else:
+                        new_mode = HVACMode.COOL  # Default to COOL
+                    
+                    if self._hvac_mode != new_mode:
+                        self._hvac_mode = new_mode
+                        updated = True
+                        _LOGGER.info(f"{self._name}: Mode updated to {new_mode}")
+                else:
+                    # AC is OFF
+                    if self._hvac_mode != HVACMode.OFF:
+                        self._hvac_mode = HVACMode.OFF
+                        updated = True
+                        _LOGGER.info(f"{self._name}: Turned OFF (from panel)")
+            
+            # Update temperature
+            if status['temperature'] is not None:
+                if self._target_temperature != status['temperature']:
+                    self._target_temperature = status['temperature']
+                    updated = True
+                    _LOGGER.info(f"{self._name}: Temperature updated to {status['temperature']}°C")
+            
+            # If anything changed, update Home Assistant
+            if updated:
+                self.schedule_update_ha_state()
+                
+        except Exception as e:
+            _LOGGER.error(f"Error handling status update for {self._name}: {e}")
 

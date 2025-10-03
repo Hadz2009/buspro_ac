@@ -6,6 +6,7 @@ A native Home Assistant custom integration for controlling HDL BusPro AC units. 
 
 ## Features
 
+- **Two-Way Communication** (v1.1.3+): Real-time status updates when AC is changed from wall panels
 - **Full Temperature Control**: Set target temperature from 16-30°C with 1 degree increments
 - **Multiple HVAC Modes**: Cool, Fan Only, and Dry (dehumidify) modes
 - **Native Climate Entity**: Full Home Assistant climate entity support with temperature slider
@@ -18,7 +19,8 @@ A native Home Assistant custom integration for controlling HDL BusPro AC units. 
 
 - Home Assistant 2023.1 or newer
 - HDL BusPro Gateway on your network
-- AC unit addresses in subnet.device format (e.g., `1.14`)
+- Environmental panel addresses in subnet.device format (e.g., `1.14`)
+  - **Note**: The address refers to your HDL environmental panel (thermostat/wall controller), not the AC unit itself. Most HDL AC systems use environmental panels to control the AC units.
 
 ## Installation
 
@@ -98,8 +100,10 @@ climate:
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `address` | Yes | Device address in `subnet.device` format (e.g., `"1.14"`) |
+| `address` | Yes | Environmental panel address in `subnet.device` format (e.g., `"1.14"`) |
 | `name` | Yes | Friendly name for the device |
+
+**Important:** The `address` should be the address of your HDL **environmental panel** (wall thermostat/controller), not the AC unit itself. In most HDL systems, AC units are controlled through these environmental panels.
 
 ## Usage
 
@@ -191,6 +195,11 @@ This integration uses an auto-discovery protocol that learns the HDL protocol st
 3. Discovers protocol structure by comparing templates (address positions, temperature byte, mode byte)
 4. Dynamically builds packets for any device, temperature, and HVAC mode
 5. Transmits commands via UDP to your HDL gateway
+6. Listens for UDP broadcasts from the gateway for real-time status updates (v1.1.3+)
+
+**Two-Way Communication (v1.1.3+):**
+
+The integration now listens for status broadcasts from your HDL gateway. When you change the AC from the physical wall panel, the gateway broadcasts the new state to all devices on the network. Home Assistant automatically receives these updates and refreshes the climate entity state in real-time - no polling required!
 
 **Temperature and Mode Control:**
 
@@ -207,12 +216,15 @@ Uses the exact HDL Pascal CRC-16 CCITT algorithm with:
 
 ## Finding Your Device Address
 
-Your HDL AC device address is in `subnet.device` format:
+Your HDL environmental panel address is in `subnet.device` format:
 
 1. Open your HDL configuration software (HDL Toolbox)
-2. Find your AC controller in the device list
-3. Note the subnet ID and device ID
-4. Format as `"subnet.device"` (e.g., device 14 on subnet 1 = `"1.14"`)
+2. Find your **environmental panel** (thermostat/wall controller) in the device list
+   - **Important**: Look for the environmental panel that controls your AC, not the AC unit itself
+3. Note the subnet ID and device ID of the environmental panel
+4. Format as `"subnet.device"` (e.g., panel 14 on subnet 1 = `"1.14"`)
+
+**Why environmental panel?** In HDL BusPro systems, AC units are typically controlled through environmental panels (wall-mounted thermostats/controllers), not directly. The environmental panel is the device you interact with on the wall to control temperature and modes.
 
 ## Troubleshooting
 
@@ -247,16 +259,22 @@ logger:
    Settings → System → Logs
    ```
 
-### State not updating
+### State not updating (v1.1.3+)
 
-This integration uses optimistic state, which means the AC state in Home Assistant reflects the commands you send, not the actual hardware state. This is normal behavior for this integration.
+As of version 1.1.3, the integration supports real-time state updates via UDP broadcasts from your HDL gateway. 
 
-Future versions may add:
-- Real-time state feedback from HDL system
-- Status polling
+**If state updates aren't working:**
+1. Ensure your gateway can send UDP broadcasts to Home Assistant
+2. Check firewall rules - UDP port 6000 must be open for incoming traffic
+3. Enable debug logging to see if broadcasts are being received
+4. Verify that changes from the physical panel show up in gateway traffic (use HDL BusPro Tool to monitor)
+
+**For older versions (pre-1.1.3):**
+The integration used optimistic state, where Home Assistant state only reflects commands you send.
 
 ## Current Features
 
+- **Two-way communication** - Real-time status updates from physical panels (v1.1.3+)
 - Turn AC ON/OFF
 - Temperature control (16-30°C with 1 degree increments)
 - HVAC modes: Cool, Fan Only, Dry (dehumidify)
@@ -269,10 +287,27 @@ Future versions may add:
 
 - Heat mode support
 - Fan speed control
-- Real-time state feedback from AC units
-- Current temperature sensor readings
+- Current temperature sensor readings (ambient temperature from panel)
 - Swing control
 - Preset modes
+
+## Changelog
+
+### v1.1.3 (Latest)
+- ✨ **NEW**: Two-way communication! Real-time status updates when AC is changed from wall panels
+- 🎯 Automatic UDP broadcast listener for status updates
+- 📡 No polling required - instant state synchronization
+- 🔧 Improved logging for debugging status updates
+
+### v1.1.2
+- Temperature and HVAC mode control
+- Multiple device support
+- Auto protocol discovery
+
+### v1.1.0
+- Initial release
+- Basic ON/OFF control
+- CRC calculation
 
 ## Contributing
 

@@ -386,6 +386,113 @@ def build_packet(verb: str, subnet: int, device: int, schema: Dict,
 # Template Loading
 # ============================================================================
 
+def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
+    """
+    Parse incoming status packet from HDL gateway broadcast.
+    
+    Args:
+        packet: Complete packet bytes (may include prefix + frame)
+        schema: protocol schema from discover_protocol()
+        
+    Returns:
+        Dictionary with: {
+            'subnet': int,
+            'device_id': int,
+            'is_on': bool,
+            'temperature': int or None,
+            'hvac_mode': int or None (HVAC_MODE_COOL/FAN/DRY)
+        }
+        Returns None if packet is not a valid AC status/command packet
+    """
+    try:
+        # Find AA AA marker to extract frame
+        aa_pos = -1
+        for i in range(len(packet) - 1):
+            if packet[i] == 0xAA and packet[i + 1] == 0xAA:
+                aa_pos = i
+                break
+        
+        if aa_pos < 0:
+            return None
+        
+        frame = packet[aa_pos:]
+        
+        # Basic validation
+        if len(frame) < 10:  # Minimum reasonable frame size
+            return None
+        
+        if frame[0] != 0xAA or frame[1] != 0xAA:
+            return None
+        
+        length = frame[2]
+        
+        # Validate length
+        expected_data_len = length - 1
+        actual_data_len = len(frame) - 3
+        
+        if actual_data_len != expected_data_len:
+            return None
+        
+        # Extract data area (skip AA AA and length byte)
+        data_area = frame[3:-2]  # Exclude CRC bytes at end
+        
+        # Extract subnet and device_id from standard HDL positions
+        # Position 6 = subnet, Position 7 = device_id
+        if len(data_area) < 8:
+            return None
+        
+        subnet = data_area[6]
+        device_id = data_area[7]
+        
+        # Determine if AC is ON or OFF by checking opcode positions
+        # We compare against known ON/OFF templates
+        is_on = None
+        opcode_positions = schema.get('opcode_positions', [])
+        
+        if opcode_positions:
+            # Check first opcode position
+            opcode_pos = opcode_positions[0]
+            if opcode_pos < len(data_area):
+                opcode_byte = data_area[opcode_pos]
+                # ON commands typically have 0x01, OFF have 0x00
+                is_on = (opcode_byte == 0x01)
+        
+        # Extract temperature if position is known
+        temperature = None
+        temp_pos = schema.get('temperature_position')
+        if temp_pos is not None and temp_pos < len(data_area):
+            temperature = data_area[temp_pos]
+            # Validate temperature range (18-30°C typical)
+            if temperature < 16 or temperature > 35:
+                temperature = None
+        
+        # Extract HVAC mode if position is known
+        hvac_mode = None
+        mode_pos = schema.get('mode_position')
+        if mode_pos is not None and mode_pos < len(data_area):
+            hvac_mode = data_area[mode_pos]
+            # Validate mode (0x00=COOL, 0x02=FAN, 0x04=DRY)
+            if hvac_mode not in [HVAC_MODE_COOL, HVAC_MODE_FAN, HVAC_MODE_DRY]:
+                hvac_mode = None
+        
+        _LOGGER.debug(
+            f"Parsed status: subnet={subnet}, device={device_id}, "
+            f"on={is_on}, temp={temperature}, mode={hvac_mode:#04x if hvac_mode is not None else None}"
+        )
+        
+        return {
+            'subnet': subnet,
+            'device_id': device_id,
+            'is_on': is_on,
+            'temperature': temperature,
+            'hvac_mode': hvac_mode,
+        }
+        
+    except Exception as e:
+        _LOGGER.debug(f"Failed to parse status packet: {e}")
+        return None
+
+
 def load_templates(templates_path: str) -> Dict[str, str]:
     """
     Load templates from JSON file.
