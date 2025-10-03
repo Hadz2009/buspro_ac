@@ -7,12 +7,24 @@ from homeassistant.components.climate import ClimateEntity, PLATFORM_SCHEMA
 from homeassistant.components.climate.const import (
     HVACMode,
     ClimateEntityFeature,
+    FanMode,
+    ATTR_FAN_MODE,
 )
 from homeassistant.const import CONF_NAME, UnitOfTemperature, ATTR_TEMPERATURE
 import homeassistant.helpers.config_validation as cv
 
 from .const import DOMAIN, CONF_DEVICES, CONF_ADDRESS
-from .hdl_ac_core import build_packet, HVAC_MODE_COOL, HVAC_MODE_FAN, HVAC_MODE_DRY
+from .hdl_ac_core import (
+    build_packet,
+    build_status_request,
+    HVAC_MODE_COOL, 
+    HVAC_MODE_FAN, 
+    HVAC_MODE_DRY,
+    FAN_SPEED_AUTO,
+    FAN_SPEED_HIGH,
+    FAN_SPEED_MEDIUM,
+    FAN_SPEED_LOW,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,6 +45,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 
 def setup_platform(hass, config, add_entities, discovery_info=None):
     """Set up HDL AC climate devices."""
+    import asyncio
     
     # Get gateway from hass.data
     if DOMAIN not in hass.data:
@@ -72,6 +85,28 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     
     if entities:
         add_entities(entities, True)
+        
+        # Request initial status for all ACs after a short delay
+        async def request_initial_status():
+            """Request status from all ACs with delays to avoid flooding."""
+            await asyncio.sleep(2)  # Wait 2 seconds for entities to fully initialize
+            
+            for entity in entities:
+                try:
+                    _LOGGER.info(f"Requesting initial status for {entity.name}")
+                    frame = build_status_request(
+                        entity._subnet,
+                        entity._device_id,
+                        gateway.protocol_schema
+                    )
+                    gateway.send_packet(frame)
+                    await asyncio.sleep(0.1)  # 100ms delay between requests
+                except Exception as e:
+                    _LOGGER.error(f"Failed to request status for {entity.name}: {e}")
+        
+        # Schedule the status request task
+        hass.async_create_task(request_initial_status())
+        
         return True
     
     _LOGGER.warning("No HDL AC devices configured")
@@ -89,6 +124,7 @@ class HdlAcClimate(ClimateEntity):
         self._device_id = device_id
         self._hvac_mode = HVACMode.OFF
         self._target_temperature = 24  # Default temperature
+        self._fan_mode = FanMode.AUTO  # Default fan mode
         self._attr_temperature_unit = UnitOfTemperature.CELSIUS
         self._attr_min_temp = 18
         self._attr_max_temp = 30
@@ -133,6 +169,7 @@ class HdlAcClimate(ClimateEntity):
             ClimateEntityFeature.TARGET_TEMPERATURE 
             | ClimateEntityFeature.TURN_ON 
             | ClimateEntityFeature.TURN_OFF
+            | ClimateEntityFeature.FAN_MODE
         )
     
     @property
@@ -159,6 +196,16 @@ class HdlAcClimate(ClimateEntity):
     def target_temperature_step(self):
         """Return the supported step of target temperature."""
         return self._attr_target_temperature_step
+    
+    @property
+    def fan_mode(self):
+        """Return the current fan mode."""
+        return self._fan_mode
+    
+    @property
+    def fan_modes(self):
+        """Return the list of available fan modes."""
+        return [FanMode.AUTO, FanMode.HIGH, FanMode.MEDIUM, FanMode.LOW]
 
     def set_hvac_mode(self, hvac_mode):
         """Set new target HVAC mode."""
@@ -184,6 +231,64 @@ class HdlAcClimate(ClimateEntity):
             self.turn_on()
         
         self.schedule_update_ha_state()
+    
+    def set_fan_mode(self, fan_mode):
+        """Set new fan mode."""
+        import time
+        try:
+            # Map Home Assistant fan mode to HDL fan speed byte
+            fan_mode_map = {
+                FanMode.AUTO: FAN_SPEED_AUTO,
+                FanMode.HIGH: FAN_SPEED_HIGH,
+                FanMode.MEDIUM: FAN_SPEED_MEDIUM,
+                FanMode.LOW: FAN_SPEED_LOW,
+            }
+            
+            fan_speed_byte = fan_mode_map.get(fan_mode, FAN_SPEED_AUTO)
+            
+            # Map Home Assistant HVAC mode to HDL mode byte
+            hvac_mode_map = {
+                HVACMode.COOL: HVAC_MODE_COOL,
+                HVACMode.FAN_ONLY: HVAC_MODE_FAN,
+                HVACMode.DRY: HVAC_MODE_DRY,
+            }
+            
+            hdl_mode = hvac_mode_map.get(self._hvac_mode, HVAC_MODE_COOL)
+            
+            # Build packet with current temp/mode + new fan speed
+            frame = build_packet(
+                "on",
+                self._subnet,
+                self._device_id,
+                self._gateway.protocol_schema,
+                temperature=self._target_temperature,
+                hvac_mode=hdl_mode,
+                fan_speed=fan_speed_byte
+            )
+            
+            # Optimistic update
+            self._last_command_sent = time.time()
+            self._pending_command = {
+                'is_on': True,
+                'temperature': self._target_temperature,
+                'hvac_mode': hdl_mode,
+                'fan_speed': fan_speed_byte
+            }
+            
+            # Send via gateway
+            success = self._gateway.send_packet(frame)
+            
+            if success:
+                self._fan_mode = fan_mode
+                self.schedule_update_ha_state()
+                _LOGGER.info(
+                    f"Set fan mode: {self._name} (fan={fan_mode})"
+                )
+            else:
+                _LOGGER.error(f"Failed to set fan mode: {self._name}")
+                
+        except Exception as e:
+            _LOGGER.error(f"Error setting fan mode {self._name}: {e}")
 
     def turn_on(self):
         """Turn AC on with current mode and temperature."""
@@ -199,14 +304,24 @@ class HdlAcClimate(ClimateEntity):
             # Get HDL mode byte (default to COOL if not specified)
             hdl_mode = hvac_mode_map.get(self._hvac_mode, HVAC_MODE_COOL)
             
-            # Build ON packet with temperature and mode
+            # Map fan mode to fan speed byte
+            fan_mode_map = {
+                FanMode.AUTO: FAN_SPEED_AUTO,
+                FanMode.HIGH: FAN_SPEED_HIGH,
+                FanMode.MEDIUM: FAN_SPEED_MEDIUM,
+                FanMode.LOW: FAN_SPEED_LOW,
+            }
+            fan_speed_byte = fan_mode_map.get(self._fan_mode, FAN_SPEED_AUTO)
+            
+            # Build ON packet with temperature, mode, and fan speed
             frame = build_packet(
                 "on",
                 self._subnet,
                 self._device_id,
                 self._gateway.protocol_schema,
                 temperature=self._target_temperature,
-                hvac_mode=hdl_mode
+                hvac_mode=hdl_mode,
+                fan_speed=fan_speed_byte
             )
             
             # Optimistic update: record what we're sending
@@ -214,7 +329,8 @@ class HdlAcClimate(ClimateEntity):
             self._pending_command = {
                 'is_on': True,
                 'temperature': self._target_temperature,
-                'hvac_mode': hdl_mode
+                'hvac_mode': hdl_mode,
+                'fan_speed': fan_speed_byte
             }
             
             # Send via gateway
@@ -387,6 +503,22 @@ class HdlAcClimate(ClimateEntity):
                     f"AC is OFF, preserving target temp {self._target_temperature}°C "
                     f"(device reported {status['temperature']}°C)"
                 )
+            
+            # Update fan mode if present in status
+            if status.get('fan_speed') is not None:
+                # Map fan speed byte to Home Assistant fan mode
+                fan_speed_map_reverse = {
+                    FAN_SPEED_AUTO: FanMode.AUTO,
+                    FAN_SPEED_HIGH: FanMode.HIGH,
+                    FAN_SPEED_MEDIUM: FanMode.MEDIUM,
+                    FAN_SPEED_LOW: FanMode.LOW,
+                }
+                new_fan_mode = fan_speed_map_reverse.get(status['fan_speed'], FanMode.AUTO)
+                if self._fan_mode != new_fan_mode:
+                    old_fan = self._fan_mode
+                    self._fan_mode = new_fan_mode
+                    updated = True
+                    changes.append(f"fan: {old_fan} → {new_fan_mode}")
             
             # If anything changed, update Home Assistant
             if updated:

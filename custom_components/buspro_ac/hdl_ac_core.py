@@ -24,6 +24,15 @@ HVAC_MODE_FAN = 0x02
 HVAC_MODE_DRY = 0x04
 
 # ============================================================================
+# Fan Speed Constants
+# ============================================================================
+
+FAN_SPEED_AUTO = 0x00
+FAN_SPEED_HIGH = 0x01
+FAN_SPEED_MEDIUM = 0x02
+FAN_SPEED_LOW = 0x03
+
+# ============================================================================
 # CRC-16 CCITT HDL Pascal Implementation
 # ============================================================================
 
@@ -184,9 +193,11 @@ def discover_protocol(templates: Dict[str, str], silent: bool = False) -> Dict:
         - opcode_positions: byte indices that change between on/off
         - temperature_position: byte index for temperature setting
         - mode_position: byte index for HVAC mode
+        - fan_speed_position: byte index for fan speed (position 15)
         - base_off_frame: off template frame
         - base_on_frame: on template frame
         - base_cool_frame: cool mode template frame (if available)
+        - base_status_request_frame: status request template frame (if available)
         - prefix: packet prefix (before AA AA)
     """
     if not silent:
@@ -284,6 +295,19 @@ def discover_protocol(templates: Dict[str, str], silent: bool = False) -> Dict:
             _LOGGER.debug(f"Discovered temperature position: {temperature_position}")
             _LOGGER.debug(f"Discovered mode position: {mode_position}")
     
+    # Load status request template if available
+    base_status_request_frame = None
+    if 'status_request' in templates:
+        try:
+            _, frame_status_req = split_packet(templates['status_request'])
+            validate_frame(frame_status_req, "status_request")
+            base_status_request_frame = frame_status_req
+            if not silent:
+                _LOGGER.debug("Loaded status_request template")
+        except Exception as e:
+            if not silent:
+                _LOGGER.warning(f"Failed to load status_request template: {e}")
+    
     if not silent:
         _LOGGER.info("Protocol discovery complete")
     
@@ -292,9 +316,11 @@ def discover_protocol(templates: Dict[str, str], silent: bool = False) -> Dict:
         'opcode_positions': opcode_positions,
         'temperature_position': temperature_position,
         'mode_position': mode_position,
+        'fan_speed_position': 15,  # Known position from packet analysis
         'base_off_frame': frame_off,
         'base_on_frame': frame_on,
         'base_cool_frame': base_cool_frame,
+        'base_status_request_frame': base_status_request_frame,
         'prefix': prefix_off,
     }
 
@@ -303,10 +329,51 @@ def discover_protocol(templates: Dict[str, str], silent: bool = False) -> Dict:
 # Packet Builder
 # ============================================================================
 
-def build_packet(verb: str, subnet: int, device: int, schema: Dict, 
-                 temperature: int = None, hvac_mode: int = None) -> bytes:
+def build_status_request(subnet: int, device: int, schema: Dict) -> bytes:
     """
-    Build a packet for given verb, device address, temperature, and HVAC mode.
+    Build a status request packet for given device address.
+    
+    Args:
+        subnet: subnet number (e.g., 1)
+        device: device number (e.g., 13)
+        schema: protocol schema from discover_protocol()
+        
+    Returns:
+        Complete frame bytes (starting with AA AA)
+    """
+    if schema.get('base_status_request_frame') is None:
+        raise ValueError("Status request template not available in schema")
+    
+    # Copy base template
+    frame = bytearray(schema['base_status_request_frame'])
+    
+    # Data area starts at position 3 (after AA AA and length byte)
+    data_area_offset = 3
+    
+    # Update device address at positions 6-7
+    frame[data_area_offset + 6] = subnet
+    frame[data_area_offset + 7] = device
+    
+    # Extract data area for CRC calculation
+    data_area = frame[data_area_offset:]
+    
+    # Update length byte (length includes itself!)
+    frame[2] = len(data_area) + 1
+    
+    # Recompute and append CRC (includes length byte)
+    length_and_data = bytearray(frame[2:])
+    append_hdl_crc(length_and_data)
+    
+    # Write back length byte + data area with new CRC
+    frame[2:] = length_and_data
+    
+    return bytes(frame)
+
+
+def build_packet(verb: str, subnet: int, device: int, schema: Dict, 
+                 temperature: int = None, hvac_mode: int = None, fan_speed: int = None) -> bytes:
+    """
+    Build a packet for given verb, device address, temperature, HVAC mode, and fan speed.
     
     Args:
         verb: "on" or "off"
@@ -315,6 +382,7 @@ def build_packet(verb: str, subnet: int, device: int, schema: Dict,
         schema: protocol schema from discover_protocol()
         temperature: target temperature in Celsius (16-30), optional
         hvac_mode: HVAC mode (HVAC_MODE_COOL/FAN/DRY), optional
+        fan_speed: fan speed (FAN_SPEED_AUTO/HIGH/MEDIUM/LOW), optional
         
     Returns:
         Complete frame bytes (starting with AA AA)
@@ -366,6 +434,11 @@ def build_packet(verb: str, subnet: int, device: int, schema: Dict,
         mode_pos = schema['mode_position']
         frame[data_area_offset + mode_pos] = hvac_mode
     
+    # Set fan speed if provided and position is known
+    if fan_speed is not None and schema.get('fan_speed_position') is not None:
+        fan_pos = schema['fan_speed_position']
+        frame[data_area_offset + fan_pos] = fan_speed
+    
     # Extract data area
     data_area = frame[data_area_offset:]
     
@@ -391,12 +464,19 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
     Parse incoming status packet from HDL gateway broadcast.
     
     This parser uses FIXED byte positions discovered from real packet analysis.
-    Only processes Type 0x18 status broadcast packets (40 bytes).
+    Processes both Type 0x18 (temperature/mode) and Type 0x1A (fan speed) broadcasts.
     
-    Packet Structure (after AA AA 18):
+    Type 0x18 Packet Structure (after AA AA 18):
     Position 0-1:  Device address (subnet, device_id)
     Position 11:   Target setpoint temperature (0x15=21°C, 0x18=24°C, etc.)
     Position 15:   ON/OFF indicator (0x20=OFF, 0x01=ON COOL, 0x21=ON FAN)
+    Position 17:   HVAC mode (0x00=COOL, 0x02=FAN, 0x04=DRY)
+    
+    Type 0x1A Packet Structure (after AA AA 1A):
+    Position 0-1:  Device address (subnet, device_id)
+    Position 11:   Target setpoint temperature
+    Position 15:   ON/OFF indicator
+    Position 16:   Fan speed (0x00=AUTO, 0x01=HIGH, 0x02=MEDIUM, 0x03=LOW)
     Position 17:   HVAC mode (0x00=COOL, 0x02=FAN, 0x04=DRY)
     
     Args:
@@ -409,9 +489,10 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
             'device_id': int,
             'is_on': bool,
             'temperature': int or None,
-            'hvac_mode': int or None (HVAC_MODE_COOL/FAN/DRY)
+            'hvac_mode': int or None (HVAC_MODE_COOL/FAN/DRY),
+            'fan_speed': int or None (FAN_SPEED_AUTO/HIGH/MEDIUM/LOW)
         }
-        Returns None if packet is not a valid Type 0x18 status packet
+        Returns None if packet is not a valid Type 0x18 or 0x1A status packet
     """
     import binascii
     
@@ -442,9 +523,9 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         
         length = frame[2]
         
-        # ⭐ ONLY process Type 0x18 status broadcasts (24 decimal)
-        if length != 0x18:
-            _LOGGER.debug(f"Ignoring non-0x18 packet (length={length:#04x})")
+        # ⭐ Process Type 0x18 (temperature/mode) and Type 0x1A (fan speed) broadcasts
+        if length not in [0x18, 0x1A]:
+            _LOGGER.debug(f"Ignoring non-0x18/0x1A packet (length={length:#04x})")
             return None
         
         # Validate frame length matches
@@ -459,8 +540,9 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         data_area = frame[3:-2]
         
         # Validate data area has enough bytes for fixed positions
-        if len(data_area) < 18:
-            _LOGGER.debug(f"Data area too short: {len(data_area)} bytes (need at least 18)")
+        min_bytes_needed = 18 if length == 0x18 else 18  # Both need at least 18 bytes
+        if len(data_area) < min_bytes_needed:
+            _LOGGER.debug(f"Data area too short: {len(data_area)} bytes (need at least {min_bytes_needed})")
             return None
         
         # ═══════════════════════════════════════════════════════════════
@@ -503,16 +585,32 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         else:
             hvac_mode = None
         
+        # Position 16: Fan speed (ONLY in 0x1A packets)
+        # 0x00 = AUTO
+        # 0x01 = HIGH
+        # 0x02 = MEDIUM
+        # 0x03 = LOW
+        fan_speed = None
+        if length == 0x1A and len(data_area) > 16:
+            fan_speed_byte = data_area[16]
+            if fan_speed_byte in [0x00, 0x01, 0x02, 0x03]:
+                fan_speed = fan_speed_byte
+        
         # ═══════════════════════════════════════════════════════════════
         # END FIXED POSITION PARSING
         # ═══════════════════════════════════════════════════════════════
         
         mode_str = f"0x{hvac_mode:02x}" if hvac_mode is not None else "None"
+        fan_str = f"0x{fan_speed:02x}" if fan_speed is not None else "None"
+        packet_type = f"0x{length:02x}"
+        
         _LOGGER.debug(
-            f"✓ Parsed Type 0x18 packet: {subnet}.{device_id} | "
-            f"ON={is_on} | Temp={temperature}°C | Mode={mode_str}"
+            f"✓ Parsed Type {packet_type} packet: {subnet}.{device_id} | "
+            f"ON={is_on} | Temp={temperature}°C | Mode={mode_str} | Fan={fan_str}"
         )
         _LOGGER.debug(f"  Position 11 (Temp): 0x{temp_byte:02x}, Position 15 (ON/OFF): 0x{on_off_byte:02x}, Position 17 (Mode): 0x{mode_byte:02x}")
+        if fan_speed is not None:
+            _LOGGER.debug(f"  Position 16 (Fan): 0x{fan_speed:02x}")
         
         return {
             'subnet': subnet,
@@ -520,6 +618,7 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
             'is_on': is_on,
             'temperature': temperature,
             'hvac_mode': hvac_mode,
+            'fan_speed': fan_speed,
         }
         
     except Exception as e:
