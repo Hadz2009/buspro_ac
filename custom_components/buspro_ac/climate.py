@@ -98,6 +98,9 @@ class HdlAcClimate(ClimateEntity):
         import time
         self._last_status_update = 0
         self._last_command_sent = 0
+        self._last_state_change = 0  # Track when state actually changed
+        self._pending_temp = None  # Track accepted temp to reject reverts
+        self._pending_mode = None  # Track accepted mode to reject reverts
         
         # Register callback for status updates
         self._gateway.register_callback(subnet, device_id, self._handle_status_update)
@@ -210,6 +213,11 @@ class HdlAcClimate(ClimateEntity):
             
             # Track when we send commands to ignore immediate status echoes
             self._last_command_sent = time.time()
+            self._last_state_change = time.time()
+            
+            # Protect the values we're sending from being reverted
+            self._pending_temp = self._target_temperature
+            self._pending_mode = hdl_mode
             
             # Send via gateway
             success = self._gateway.send_packet(frame)
@@ -242,6 +250,11 @@ class HdlAcClimate(ClimateEntity):
             
             # Track when we send commands to ignore immediate status echoes
             self._last_command_sent = time.time()
+            self._last_state_change = time.time()
+            
+            # Clear pending values when turning off
+            self._pending_temp = None
+            self._pending_mode = None
             
             # Send via gateway
             success = self._gateway.send_packet(frame)
@@ -267,24 +280,68 @@ class HdlAcClimate(ClimateEntity):
         
         current_time = time.time()
         
-        # Ignore status updates that come within 2 seconds of sending a command
+        # Ignore status updates that come within 2 seconds of sending a command FROM HA
         # (prevents feedback loop where our command triggers a broadcast that overwrites our change)
         if current_time - self._last_command_sent < 2.0:
-            _LOGGER.debug(f"⏭️ Ignoring status update (within 2s of command) for {self._name}")
+            _LOGGER.debug(f"⏭️ Ignoring status update (within 2s of HA command) for {self._name}")
             return
         
-        # Ignore duplicate updates that come too quickly (debounce within 0.3 seconds)
-        # This prevents rapid-fire broadcasts from causing state flipping
-        if current_time - self._last_status_update < 0.3:
-            _LOGGER.debug(f"⏭️ Ignoring rapid duplicate for {self._name} (debounce)")
-            return
+        _LOGGER.info(f"🎯 Received status update for {self._name}: {status}")
         
-        _LOGGER.info(f"🎯 Status update for {self._name}: {status}")
+        # Check if this is a CHANGE from current state or a REVERT to old state
+        temp_changed = status['temperature'] is not None and status['temperature'] != self._target_temperature
+        mode_changed = False
         
-        # Update timestamp BEFORE applying to prevent race conditions
+        if status['hvac_mode'] is not None:
+            if status['hvac_mode'] == HVAC_MODE_COOL:
+                mode_changed = self._hvac_mode != HVACMode.COOL
+            elif status['hvac_mode'] == HVAC_MODE_FAN:
+                mode_changed = self._hvac_mode != HVACMode.FAN_ONLY
+            elif status['hvac_mode'] == HVAC_MODE_DRY:
+                mode_changed = self._hvac_mode != HVACMode.DRY
+        
+        is_change = temp_changed or mode_changed
+        
+        # If we recently accepted a change (within 3 seconds), check if this is a revert
+        if current_time - self._last_state_change < 3.0:
+            # Check if this update is trying to revert to the OLD values
+            is_temp_revert = (
+                self._pending_temp is not None and 
+                status['temperature'] is not None and 
+                status['temperature'] != self._pending_temp
+            )
+            
+            is_mode_revert = (
+                self._pending_mode is not None and
+                status['hvac_mode'] is not None and
+                status['hvac_mode'] != self._pending_mode
+            )
+            
+            if is_temp_revert or is_mode_revert:
+                _LOGGER.warning(
+                    f"🚫 REJECTING revert for {self._name}: "
+                    f"Broadcast trying to change temp={self._pending_temp}°C mode={self._pending_mode} "
+                    f"back to temp={status['temperature']}°C mode={status['hvac_mode']}. "
+                    f"Keeping user's change!"
+                )
+                return
+        
+        # This is either a valid new change OR we're past the protection window
+        if is_change:
+            _LOGGER.info(f"✅ ACCEPTING change for {self._name}")
+            self._last_state_change = current_time
+            # Store what we're accepting to detect reverts
+            if temp_changed:
+                self._pending_temp = status['temperature']
+            if mode_changed:
+                self._pending_mode = status['hvac_mode']
+        else:
+            _LOGGER.debug(f"ℹ️ No change detected for {self._name}")
+        
+        # Update timestamp
         self._last_status_update = current_time
         
-        # Apply the update immediately (no threading delay)
+        # Apply the update immediately
         self._apply_status_update(status)
     
     def _apply_status_update(self, status: dict):
