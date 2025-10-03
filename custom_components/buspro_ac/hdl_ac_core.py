@@ -390,6 +390,15 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
     """
     Parse incoming status packet from HDL gateway broadcast.
     
+    This parser uses FIXED byte positions discovered from real packet analysis.
+    Only processes Type 0x18 status broadcast packets (40 bytes).
+    
+    Packet Structure (after AA AA 18):
+    Position 0-1:  Device address (subnet, device_id)
+    Position 17:   ON/OFF indicator (0x20=OFF, 0x01=ON COOL, 0x21=ON FAN)
+    Position 19:   HVAC mode (0x00/0x01=COOL, 0x02=FAN, 0x04=DRY)
+    Position 21:   Target setpoint temperature (0x15=21°C, 0x18=24°C, etc.)
+    
     Args:
         packet: Complete packet bytes (may include prefix + frame)
         schema: protocol schema from discover_protocol()
@@ -402,7 +411,7 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
             'temperature': int or None,
             'hvac_mode': int or None (HVAC_MODE_COOL/FAN/DRY)
         }
-        Returns None if packet is not a valid AC status/command packet
+        Returns None if packet is not a valid Type 0x18 status packet
     """
     import binascii
     
@@ -417,125 +426,96 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
                 break
         
         if aa_pos < 0:
-            _LOGGER.warning(f"❌ No AA AA marker found in packet")
+            _LOGGER.debug(f"No AA AA marker found, skipping packet")
             return None
         
-        _LOGGER.debug(f"✓ Found AA AA at position {aa_pos}")
         frame = packet[aa_pos:]
         
-        # Basic validation
-        if len(frame) < 10:  # Minimum reasonable frame size
-            _LOGGER.warning(f"❌ Frame too short: {len(frame)} bytes (need at least 10)")
+        # Validate frame basics
+        if len(frame) < 10:
+            _LOGGER.debug(f"Frame too short: {len(frame)} bytes")
             return None
         
         if frame[0] != 0xAA or frame[1] != 0xAA:
-            _LOGGER.warning(f"❌ Frame doesn't start with AA AA")
+            _LOGGER.debug(f"Frame doesn't start with AA AA")
             return None
         
         length = frame[2]
-        _LOGGER.debug(f"✓ Length byte: {length}")
         
-        # Validate length
+        # ⭐ ONLY process Type 0x18 status broadcasts (24 decimal)
+        if length != 0x18:
+            _LOGGER.debug(f"Ignoring non-0x18 packet (length={length:#04x})")
+            return None
+        
+        # Validate frame length matches
         expected_data_len = length - 1
         actual_data_len = len(frame) - 3
         
-        _LOGGER.debug(f"✓ Expected data: {expected_data_len} bytes, Actual: {actual_data_len} bytes")
-        
         if actual_data_len != expected_data_len:
-            _LOGGER.warning(f"❌ Length mismatch: expected {expected_data_len}, got {actual_data_len}")
+            _LOGGER.debug(f"Length mismatch: expected {expected_data_len}, got {actual_data_len}")
             return None
         
-        # Extract data area (skip AA AA and length byte)
-        data_area = frame[3:-2]  # Exclude CRC bytes at end
+        # Extract data area (skip AA AA and length byte, exclude 2 CRC bytes at end)
+        data_area = frame[3:-2]
         
-        _LOGGER.debug(f"✓ Extracted data area: {len(data_area)} bytes")
-        
-        # Extract subnet and device_id
-        # In STATUS broadcasts: positions 0-1 are target device (subnet, device)
-        # In COMMAND packets: positions 6-7 are target device
-        # We check positions 0-1 first (status broadcasts)
-        if len(data_area) < 2:
-            _LOGGER.warning(f"❌ Data area too short: {len(data_area)} bytes (need at least 2)")
+        # Validate data area has enough bytes for fixed positions
+        if len(data_area) < 22:
+            _LOGGER.debug(f"Data area too short: {len(data_area)} bytes (need 22)")
             return None
         
-        # Try positions 0-1 first (status broadcast format)
+        # ═══════════════════════════════════════════════════════════════
+        # FIXED POSITION PARSING - No scanning, no guessing!
+        # ═══════════════════════════════════════════════════════════════
+        
+        # Position 0-1: Device address
         subnet = data_area[0]
         device_id = data_area[1]
         
-        _LOGGER.debug(f"✓ Extracted device address: {subnet}.{device_id}")
+        # Position 17: ON/OFF indicator
+        # 0x20 = OFF
+        # 0x01 = ON in COOL mode
+        # 0x21 = ON in FAN mode
+        on_off_byte = data_area[17]
+        is_on = (on_off_byte != 0x20)
         
-        # For status broadcasts, the structure is different than commands
-        # We need to scan for likely temperature and mode values
+        # Position 19: HVAC mode
+        # 0x00 or 0x01 = COOL mode
+        # 0x02 = FAN mode
+        # 0x04 = DRY mode
+        mode_byte = data_area[19]
         
-        # Extract temperature from specific position 11
-        # HDL packets contain multiple temp values; position 11 is the target temperature
-        temperature = None
-        try:
-            if len(data_area) > 11:
-                temp_byte = data_area[11]
-                # Validate temperature range (16-35°C is typical for AC)
-                if 16 <= temp_byte <= 35:
-                    temperature = temp_byte
-                    _LOGGER.debug(f"✓ Found temperature {temperature}°C at position 11")
-                else:
-                    _LOGGER.debug(f"⚠️ Temperature at position 11 ({temp_byte}) out of normal range")
-        except Exception as e:
-            _LOGGER.warning(f"⚠️ Error reading temperature: {e}")
+        # Map to standard HVAC mode constants
+        if mode_byte in [0x00, 0x01]:
+            hvac_mode = HVAC_MODE_COOL
+        elif mode_byte == 0x02:
+            hvac_mode = HVAC_MODE_FAN
+        elif mode_byte == 0x04:
+            hvac_mode = HVAC_MODE_DRY
+        else:
+            hvac_mode = None
         
-        # Look for HVAC mode (0x00=COOL, 0x02=FAN, 0x04=DRY)
-        hvac_mode = None
-        try:
-            for i in range(len(data_area)):
-                if data_area[i] in [HVAC_MODE_COOL, HVAC_MODE_FAN, HVAC_MODE_DRY]:
-                    # Found a potential mode byte
-                    if i >= 8:  # Mode usually in later positions
-                        hvac_mode = data_area[i]
-                        _LOGGER.debug(f"✓ Found mode 0x{hvac_mode:02x} at position {i}")
-                        break
-        except Exception as e:
-            _LOGGER.warning(f"⚠️ Error scanning for mode: {e}")
+        # Position 21: Target setpoint temperature
+        temp_byte = data_area[21]
         
-        # Determine ON/OFF state using multiple strategies
-        is_on = None
-        try:
-            # Strategy 1: Check position 8 for operation byte
-            if len(data_area) > 8:
-                op_byte = data_area[8]
-                if op_byte in [0x0a, 0x01]:  # ON indicators
-                    is_on = True
-                    _LOGGER.debug(f"✓ Detected ON state (byte at pos 8 = 0x{op_byte:02x})")
-                elif op_byte in [0x00, 0xf8]:  # OFF indicators (0xf8 is standby/off state)
-                    is_on = False
-                    _LOGGER.debug(f"✓ Detected OFF state (byte at pos 8 = 0x{op_byte:02x})")
-            
-            # Strategy 2: Check for invalid temperature (0xff or out of range) = likely OFF
-            if is_on is None and len(data_area) > 11:
-                temp_byte = data_area[11]
-                if temp_byte == 0xff or temp_byte < 10 or temp_byte > 40:
-                    is_on = False
-                    _LOGGER.debug(f"✓ Detected OFF state (invalid temp byte = 0x{temp_byte:02x})")
-            
-            # Strategy 3: Check position 10 for additional OFF indicators
-            if is_on is None and len(data_area) > 10:
-                if data_area[10] == 0xff:
-                    is_on = False
-                    _LOGGER.debug(f"✓ Detected OFF state (pos 10 = 0xff)")
-            
-            # Strategy 4 (FALLBACK): If we have a valid HVAC mode, assume AC is ON
-            # (AC wouldn't report a mode like COOL/FAN/DRY if it was OFF)
-            if is_on is None and hvac_mode is not None:
-                is_on = True
-                _LOGGER.debug(f"✓ Inferred ON state from mode presence (mode=0x{hvac_mode:02x})")
-                
-        except Exception as e:
-            _LOGGER.warning(f"⚠️ Error detecting on/off state: {e}")
+        # Validate temperature range (16-30°C typical for AC setpoints)
+        # When OFF or in FAN mode, temp byte might be 0x00, so handle that
+        if temp_byte == 0x00:
+            temperature = None  # No temperature setpoint (OFF or FAN mode)
+        elif 16 <= temp_byte <= 35:
+            temperature = temp_byte
+        else:
+            temperature = None  # Invalid range
+        
+        # ═══════════════════════════════════════════════════════════════
+        # END FIXED POSITION PARSING
+        # ═══════════════════════════════════════════════════════════════
         
         mode_str = f"0x{hvac_mode:02x}" if hvac_mode is not None else "None"
         _LOGGER.debug(
-            f"Parsed status: subnet={subnet}, device={device_id}, "
-            f"on={is_on}, temp={temperature}, mode={mode_str}"
+            f"✓ Parsed Type 0x18 packet: {subnet}.{device_id} | "
+            f"ON={is_on} | Temp={temperature}°C | Mode={mode_str}"
         )
-        _LOGGER.debug(f"  Raw data area (first 20 bytes): {' '.join(f'{b:02x}' for b in data_area[:20])}")
+        _LOGGER.debug(f"  Position 17 (ON/OFF): 0x{on_off_byte:02x}, Position 19 (Mode): 0x{mode_byte:02x}, Position 21 (Temp): 0x{temp_byte:02x}")
         
         return {
             'subnet': subnet,
@@ -546,7 +526,7 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         }
         
     except Exception as e:
-        _LOGGER.debug(f"Failed to parse status packet: {e}")
+        _LOGGER.debug(f"Failed to parse status packet: {e}", exc_info=True)
         return None
 
 
