@@ -294,11 +294,19 @@ class HdlAcClimate(ClimateEntity):
             )
             return
         
+        # DEBOUNCING: Ignore if this status is identical to the last one received
+        # This prevents state flapping from rapid, duplicate broadcasts
+        if status == self._last_status:
+            _LOGGER.debug(f"🔄 Ignoring duplicate status for {self._name}")
+            return
+        
         _LOGGER.info(f"🎯 Received status update for {self._name}: {status}")
         
         # Ignore DRY mode broadcasts since we removed it from UI
         if status['hvac_mode'] == HVAC_MODE_DRY:
             _LOGGER.debug(f"Ignoring DRY mode broadcast for {self._name}")
+            # Still update last_status to prevent re-processing this packet
+            self._last_status = status.copy()
             return
         
         # Store as last known device state
