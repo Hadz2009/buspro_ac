@@ -1,8 +1,7 @@
 {
   "name": "HDL AC Control",
-  "content_in_root": false,
+  "content_in_root": true,
   "render_readme": true,
-  "homeassistant": "2023.1.0",
-  "filename": "buspro_ac"
+  "homeassistant": "2023.1.0"
 }
 
