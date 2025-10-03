@@ -2,24 +2,25 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 
-A native Home Assistant custom integration for controlling HDL BusPro AC units. Simply add device addresses in `configuration.yaml` and AC climate entities appear automatically with ON/OFF controls.
+A native Home Assistant custom integration for controlling HDL BusPro AC units. Configure your device addresses in `configuration.yaml` and get full climate control with temperature settings, multiple HVAC modes, and automatic CRC calculation.
 
-## ✨ Features
+## Features
 
-- 🔌 **Plug & Play**: Add devices in configuration, they appear automatically
-- 🌡️ **Native Climate Entity**: Full Home Assistant climate entity support
-- 🔒 **Auto CRC Calculation**: Correct HDL Pascal CRC-16 CCITT implementation
-- 📡 **Protocol Discovery**: Automatically learns protocol structure from templates
-- 🚀 **Simple Setup**: No complex configuration needed
-- 🎯 **Multiple Devices**: Control unlimited AC units
+- **Full Temperature Control**: Set target temperature from 16-30°C with 1 degree increments
+- **Multiple HVAC Modes**: Cool, Fan Only, and Dry (dehumidify) modes
+- **Native Climate Entity**: Full Home Assistant climate entity support with temperature slider
+- **Auto CRC Calculation**: Correct HDL Pascal CRC-16 CCITT implementation
+- **Protocol Discovery**: Automatically learns protocol structure from templates
+- **Simple Setup**: No complex configuration needed
+- **Multiple Devices**: Control unlimited AC units
 
-## 📋 Requirements
+## Requirements
 
 - Home Assistant 2023.1 or newer
 - HDL BusPro Gateway on your network
-- AC unit addresses (subnet.device format, e.g., `1.14`)
+- AC unit addresses in subnet.device format (e.g., `1.14`)
 
-## 🚀 Installation
+## Installation
 
 ### Method 1: HACS (Recommended)
 
@@ -55,7 +56,7 @@ A native Home Assistant custom integration for controlling HDL BusPro AC units. 
 └── configuration.yaml
 ```
 
-## ⚙️ Configuration
+## Configuration
 
 Add to your `configuration.yaml`:
 
@@ -100,30 +101,55 @@ climate:
 | `address` | Yes | Device address in `subnet.device` format (e.g., `"1.14"`) |
 | `name` | Yes | Friendly name for the device |
 
-## 📖 Usage
+## Usage
 
-After configuration and restart:
+After configuration and restart, your AC devices will appear in Home Assistant as climate entities. Find them under **Settings → Devices & Services → Entities**. Entity IDs will be automatically generated like `climate.living_room_ac`, `climate.bedroom_ac`, etc.
 
-1. Your AC devices will appear in Home Assistant as climate entities
-2. Find them under **Settings** → **Devices & Services** → **Entities**
-3. Entity IDs will be: `climate.living_room_ac`, `climate.bedroom_ac`, etc.
+### Climate Controls
 
-### Basic Controls
+Each AC unit provides the following controls:
 
-**In Home Assistant UI:**
-- Toggle ON/OFF from climate card
-- Use HVAC mode selector (OFF / COOL)
+**Temperature Control:**
+- Set target temperature from 16°C to 30°C
+- Temperature slider with 1 degree increments
+- Works in all HVAC modes (Cool, Fan, Dry)
 
-**In Automations:**
+**HVAC Modes:**
+- **OFF** - Turn AC completely off
+- **COOL** - Cooling mode (air conditioning)
+- **FAN ONLY** - Fan circulation without cooling
+- **DRY** - Dehumidify mode (removes moisture from air)
+
+### Using in Home Assistant UI
+
+From the climate card, you can:
+- Use the temperature slider to set your desired temperature
+- Use the mode dropdown to switch between OFF, COOL, FAN ONLY, and DRY
+- Changes are sent immediately to your AC unit
+
+### Using in Automations
+
+**Set temperature and mode:**
 ```yaml
-# Turn ON
+service: climate.set_temperature
+target:
+  entity_id: climate.living_room_ac
+data:
+  temperature: 22
+  hvac_mode: cool
+```
+
+**Change HVAC mode only:**
+```yaml
 service: climate.set_hvac_mode
 target:
   entity_id: climate.living_room_ac
 data:
-  hvac_mode: cool
+  hvac_mode: fan_only
+```
 
-# Turn OFF
+**Turn off AC:**
+```yaml
 service: climate.set_hvac_mode
 target:
   entity_id: climate.living_room_ac
@@ -131,38 +157,55 @@ data:
   hvac_mode: "off"
 ```
 
-**In Scripts:**
+### Using in Scripts
+
 ```yaml
-turn_on_all_acs:
+cool_all_bedrooms:
   sequence:
-    - service: climate.turn_on
+    - service: climate.set_temperature
       target:
         entity_id:
-          - climate.living_room_ac
           - climate.bedroom_ac
-          - climate.kitchen_ac
+          - climate.guest_room_ac
+      data:
+        temperature: 23
+        hvac_mode: cool
+
+turn_on_fan_only:
+  sequence:
+    - service: climate.set_hvac_mode
+      target:
+        entity_id: climate.living_room_ac
+      data:
+        hvac_mode: fan_only
 ```
 
-## 🔧 How It Works
+## How It Works
 
-This integration uses an **auto-discovery protocol** that:
+This integration uses an auto-discovery protocol that learns the HDL protocol structure from templates and dynamically builds packets with the correct CRC for any device and temperature setting.
 
-1. **Loads templates** - Reads protocol templates from `templates.json`
-2. **Validates CRC** - Uses exact HDL Pascal CRC-16 CCITT algorithm
-3. **Discovers protocol** - Automatically finds address and command byte positions
-4. **Builds packets** - Dynamically creates correct packets for any device
-5. **Sends commands** - Transmits via UDP to your HDL gateway
+**The process:**
+
+1. Loads protocol templates from `templates.json`
+2. Validates CRC using the exact HDL Pascal CRC-16 CCITT algorithm
+3. Discovers protocol structure by comparing templates (address positions, temperature byte, mode byte)
+4. Dynamically builds packets for any device, temperature, and HVAC mode
+5. Transmits commands via UDP to your HDL gateway
+
+**Temperature and Mode Control:**
+
+The integration automatically detects which bytes control temperature and HVAC mode by comparing different command templates. When you change the temperature or mode in Home Assistant, it updates the appropriate bytes and recalculates the CRC checksum automatically.
 
 ### CRC Implementation
 
-Uses the **exact HDL Pascal CRC-16 CCITT** algorithm:
+Uses the exact HDL Pascal CRC-16 CCITT algorithm with:
 - Polynomial: `0x1021`
 - Left-shift algorithm
 - High-byte indexed lookup table
 - Includes length byte in calculation
 - Format: `[CRCHi, CRCLo]`
 
-## 📝 Finding Your Device Address
+## Finding Your Device Address
 
 Your HDL AC device address is in `subnet.device` format:
 
@@ -171,7 +214,7 @@ Your HDL AC device address is in `subnet.device` format:
 3. Note the subnet ID and device ID
 4. Format as `"subnet.device"` (e.g., device 14 on subnet 1 = `"1.14"`)
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Integration not loading
 
@@ -206,32 +249,32 @@ logger:
 
 ### State not updating
 
-This integration uses **optimistic state** (tracks state internally). The AC state in Home Assistant reflects commands sent, not actual hardware state.
+This integration uses optimistic state, which means the AC state in Home Assistant reflects the commands you send, not the actual hardware state. This is normal behavior for this integration.
 
-**Future versions will add:**
+Future versions may add:
 - Real-time state feedback from HDL system
 - Status polling
 
-## 🎯 Current Features
+## Current Features
 
-- ✅ Turn AC ON
-- ✅ Turn AC OFF  
-- ✅ HVAC mode control (OFF / COOL)
-- ✅ Multiple AC support
-- ✅ Auto protocol discovery
-- ✅ Correct CRC calculation
+- Turn AC ON/OFF
+- Temperature control (16-30°C with 1 degree increments)
+- HVAC modes: Cool, Fan Only, Dry (dehumidify)
+- Multiple AC support
+- Auto protocol discovery
+- Automatic CRC calculation for all commands
+- Dynamic packet building for any temperature/mode combination
 
-## 🚧 Planned Features
+## Planned Features
 
-- ⏳ Temperature control
-- ⏳ HVAC modes (Heat, Fan, Dry, Auto)
-- ⏳ Fan speed control
-- ⏳ Real-time state feedback
-- ⏳ Current temperature sensor
-- ⏳ Swing control
-- ⏳ Preset modes
+- Heat mode support
+- Fan speed control
+- Real-time state feedback from AC units
+- Current temperature sensor readings
+- Swing control
+- Preset modes
 
-## 🤝 Contributing
+## Contributing
 
 Found a bug? Have a feature request?
 
@@ -239,24 +282,22 @@ Found a bug? Have a feature request?
 2. Provide Home Assistant logs
 3. Include your configuration (remove sensitive data)
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - Based on HDL BusPro protocol reverse engineering
 - Inspired by the [eyesoft/home_assistant_buspro](https://github.com/eyesoft/home_assistant_buspro) integration
 - Uses exact HDL Pascal CRC-16 CCITT implementation
 
-## 📚 Related Projects
+## Related Projects
 
 - [HDL BusPro Integration](https://github.com/eyesoft/home_assistant_buspro) - Original HDL integration for lights, switches, and floor heating
 - [HDL AC Control CLI](https://github.com/Hadz2009/buspro_ac) - Standalone CLI tool for HDL AC control
 
 ---
 
-**Made with ❤️ for the Home Assistant community**
-
-If this integration helps you, consider giving it a ⭐ on GitHub!
+Made for the Home Assistant community. If this integration helps you, consider giving it a star on GitHub.
 
