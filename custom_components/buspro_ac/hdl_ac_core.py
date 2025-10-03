@@ -504,7 +504,7 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
                 if op_byte in [0x0a, 0x01]:  # ON indicators
                     is_on = True
                     _LOGGER.debug(f"✓ Detected ON state (byte at pos 8 = 0x{op_byte:02x})")
-                elif op_byte == 0x00:  # OFF indicator
+                elif op_byte in [0x00, 0xf8]:  # OFF indicators (0xf8 is standby/off state)
                     is_on = False
                     _LOGGER.debug(f"✓ Detected OFF state (byte at pos 8 = 0x{op_byte:02x})")
             
