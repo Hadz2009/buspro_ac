@@ -116,12 +116,22 @@ class HdlAcClimate(ClimateEntity):
     @property
     def hvac_modes(self):
         """Return the list of available HVAC modes."""
-        return [HVACMode.OFF, HVACMode.COOL, HVACMode.FAN_ONLY, HVACMode.DRY]
+        # Don't include OFF here - use separate turn_on/turn_off controls
+        return [HVACMode.COOL, HVACMode.FAN_ONLY, HVACMode.DRY]
 
     @property
     def supported_features(self):
         """Return the list of supported features."""
-        return ClimateEntityFeature.TARGET_TEMPERATURE
+        return (
+            ClimateEntityFeature.TARGET_TEMPERATURE 
+            | ClimateEntityFeature.TURN_ON 
+            | ClimateEntityFeature.TURN_OFF
+        )
+    
+    @property
+    def temperature_unit(self):
+        """Return the unit of measurement."""
+        return self._attr_temperature_unit
     
     @property
     def target_temperature(self):
@@ -144,12 +154,13 @@ class HdlAcClimate(ClimateEntity):
         return self._attr_target_temperature_step
 
     def set_hvac_mode(self, hvac_mode):
-        """Set new target HVAC mode."""
-        if hvac_mode == HVACMode.OFF:
-            self.turn_off()
-        elif hvac_mode in [HVACMode.COOL, HVACMode.FAN_ONLY, HVACMode.DRY]:
+        """Set new target HVAC mode (does not turn AC on/off)."""
+        if hvac_mode in [HVACMode.COOL, HVACMode.FAN_ONLY, HVACMode.DRY]:
             self._hvac_mode = hvac_mode
-            self.turn_on()
+            # If AC is currently on, apply the new mode
+            if self._hvac_mode != HVACMode.OFF:
+                self.turn_on()
+            self.schedule_update_ha_state()
         else:
             _LOGGER.warning(f"Unsupported HVAC mode: {hvac_mode}")
     
