@@ -329,13 +329,20 @@ class HdlAcClimate(ClimateEntity):
                             updated = True
                             _LOGGER.warning(f"✅ {self._name}: Turned OFF (was {old_mode})")
                     else:
-                        # is_on is None - mode change without power state
-                        # Still update mode if AC appears to be on (mode != OFF)
-                        if self._hvac_mode != HVACMode.OFF and self._hvac_mode != new_mode:
+                        # is_on is None but we have a mode - AC is probably ON
+                        # Apply the mode change regardless of current state
+                        if self._hvac_mode != new_mode:
                             old_mode = self._hvac_mode
                             self._hvac_mode = new_mode
                             updated = True
-                            _LOGGER.warning(f"✅ {self._name}: Mode {old_mode} → {new_mode} (power state unknown)")
+                            _LOGGER.warning(f"✅ {self._name}: Mode {old_mode} → {new_mode} (inferred from mode)")
+            elif status['is_on'] is False:
+                # No mode but explicitly OFF
+                if self._hvac_mode != HVACMode.OFF:
+                    old_mode = self._hvac_mode
+                    self._hvac_mode = HVACMode.OFF
+                    updated = True
+                    _LOGGER.warning(f"✅ {self._name}: Turned OFF (was {old_mode})")
             
             # Update temperature (always accept temperature changes)
             if status['temperature'] is not None:

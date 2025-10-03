@@ -506,6 +506,13 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
                 elif data_area[8] == 0x00:
                     is_on = False
                     _LOGGER.debug(f"✓ Detected OFF state (byte at pos 8 = 0x{data_area[8]:02x})")
+            
+            # FALLBACK: If we have a valid HVAC mode, assume AC is ON
+            # (AC wouldn't report a mode like COOL/FAN/DRY if it was OFF)
+            if is_on is None and hvac_mode is not None:
+                is_on = True
+                _LOGGER.debug(f"✓ Inferred ON state from mode presence (mode=0x{hvac_mode:02x})")
+                
         except Exception as e:
             _LOGGER.warning(f"⚠️ Error detecting on/off state: {e}")
         
