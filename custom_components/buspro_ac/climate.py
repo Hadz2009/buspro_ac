@@ -7,8 +7,6 @@ from homeassistant.components.climate import ClimateEntity, PLATFORM_SCHEMA
 from homeassistant.components.climate.const import (
     HVACMode,
     ClimateEntityFeature,
-    FanMode,
-    ATTR_FAN_MODE,
 )
 from homeassistant.const import CONF_NAME, UnitOfTemperature, ATTR_TEMPERATURE
 import homeassistant.helpers.config_validation as cv
@@ -27,6 +25,12 @@ from .hdl_ac_core import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Fan mode constants (as strings for compatibility with older HA versions)
+FAN_AUTO = "auto"
+FAN_HIGH = "high"
+FAN_MEDIUM = "medium"
+FAN_LOW = "low"
 
 # Climate platform schema
 DEVICE_SCHEMA = vol.Schema(
@@ -124,7 +128,7 @@ class HdlAcClimate(ClimateEntity):
         self._device_id = device_id
         self._hvac_mode = HVACMode.OFF
         self._target_temperature = 24  # Default temperature
-        self._fan_mode = FanMode.AUTO  # Default fan mode
+        self._fan_mode = FAN_AUTO  # Default fan mode
         self._attr_temperature_unit = UnitOfTemperature.CELSIUS
         self._attr_min_temp = 18
         self._attr_max_temp = 30
@@ -205,7 +209,7 @@ class HdlAcClimate(ClimateEntity):
     @property
     def fan_modes(self):
         """Return the list of available fan modes."""
-        return [FanMode.AUTO, FanMode.HIGH, FanMode.MEDIUM, FanMode.LOW]
+        return [FAN_AUTO, FAN_HIGH, FAN_MEDIUM, FAN_LOW]
 
     def set_hvac_mode(self, hvac_mode):
         """Set new target HVAC mode."""
@@ -238,10 +242,10 @@ class HdlAcClimate(ClimateEntity):
         try:
             # Map Home Assistant fan mode to HDL fan speed byte
             fan_mode_map = {
-                FanMode.AUTO: FAN_SPEED_AUTO,
-                FanMode.HIGH: FAN_SPEED_HIGH,
-                FanMode.MEDIUM: FAN_SPEED_MEDIUM,
-                FanMode.LOW: FAN_SPEED_LOW,
+                FAN_AUTO: FAN_SPEED_AUTO,
+                FAN_HIGH: FAN_SPEED_HIGH,
+                FAN_MEDIUM: FAN_SPEED_MEDIUM,
+                FAN_LOW: FAN_SPEED_LOW,
             }
             
             fan_speed_byte = fan_mode_map.get(fan_mode, FAN_SPEED_AUTO)
@@ -306,10 +310,10 @@ class HdlAcClimate(ClimateEntity):
             
             # Map fan mode to fan speed byte
             fan_mode_map = {
-                FanMode.AUTO: FAN_SPEED_AUTO,
-                FanMode.HIGH: FAN_SPEED_HIGH,
-                FanMode.MEDIUM: FAN_SPEED_MEDIUM,
-                FanMode.LOW: FAN_SPEED_LOW,
+                FAN_AUTO: FAN_SPEED_AUTO,
+                FAN_HIGH: FAN_SPEED_HIGH,
+                FAN_MEDIUM: FAN_SPEED_MEDIUM,
+                FAN_LOW: FAN_SPEED_LOW,
             }
             fan_speed_byte = fan_mode_map.get(self._fan_mode, FAN_SPEED_AUTO)
             
@@ -508,12 +512,12 @@ class HdlAcClimate(ClimateEntity):
             if status.get('fan_speed') is not None:
                 # Map fan speed byte to Home Assistant fan mode
                 fan_speed_map_reverse = {
-                    FAN_SPEED_AUTO: FanMode.AUTO,
-                    FAN_SPEED_HIGH: FanMode.HIGH,
-                    FAN_SPEED_MEDIUM: FanMode.MEDIUM,
-                    FAN_SPEED_LOW: FanMode.LOW,
+                    FAN_SPEED_AUTO: FAN_AUTO,
+                    FAN_SPEED_HIGH: FAN_HIGH,
+                    FAN_SPEED_MEDIUM: FAN_MEDIUM,
+                    FAN_SPEED_LOW: FAN_LOW,
                 }
-                new_fan_mode = fan_speed_map_reverse.get(status['fan_speed'], FanMode.AUTO)
+                new_fan_mode = fan_speed_map_reverse.get(status['fan_speed'], FAN_AUTO)
                 if self._fan_mode != new_fan_mode:
                     old_fan = self._fan_mode
                     self._fan_mode = new_fan_mode
