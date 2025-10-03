@@ -395,9 +395,9 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
     
     Packet Structure (after AA AA 18):
     Position 0-1:  Device address (subnet, device_id)
-    Position 16:   ON/OFF indicator (0x20=OFF, 0x01=ON COOL, 0x21=ON FAN)
-    Position 18:   HVAC mode (0x00=COOL, 0x02=FAN, 0x04=DRY)
-    Position 19:   Target setpoint temperature (0x15=21°C, 0x18=24°C, etc.)
+    Position 11:   Target setpoint temperature (0x15=21°C, 0x18=24°C, etc.)
+    Position 15:   ON/OFF indicator (0x20=OFF, 0x01=ON COOL, 0x21=ON FAN)
+    Position 17:   HVAC mode (0x00=COOL, 0x02=FAN, 0x04=DRY)
     
     Args:
         packet: Complete packet bytes (may include prefix + frame)
@@ -459,8 +459,8 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         data_area = frame[3:-2]
         
         # Validate data area has enough bytes for fixed positions
-        if len(data_area) < 20:
-            _LOGGER.debug(f"Data area too short: {len(data_area)} bytes (need at least 20)")
+        if len(data_area) < 18:
+            _LOGGER.debug(f"Data area too short: {len(data_area)} bytes (need at least 18)")
             return None
         
         # ═══════════════════════════════════════════════════════════════
@@ -471,18 +471,27 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         subnet = data_area[0]
         device_id = data_area[1]
         
-        # Position 16: ON/OFF indicator
+        # Position 11: Target setpoint temperature
+        temp_byte = data_area[11]
+        
+        # Validate temperature range (16-35°C typical for AC setpoints)
+        if 16 <= temp_byte <= 35:
+            temperature = temp_byte
+        else:
+            temperature = None  # Invalid range or not applicable
+        
+        # Position 15: ON/OFF indicator
         # 0x20 = OFF
         # 0x01 = ON in COOL mode
         # 0x21 = ON in FAN mode
-        on_off_byte = data_area[16]
+        on_off_byte = data_area[15]
         is_on = (on_off_byte != 0x20)
         
-        # Position 18: HVAC mode
+        # Position 17: HVAC mode
         # 0x00 = COOL mode
         # 0x02 = FAN mode
         # 0x04 = DRY mode
-        mode_byte = data_area[18]
+        mode_byte = data_area[17]
         
         # Map to standard HVAC mode constants
         if mode_byte == 0x00:
@@ -494,18 +503,6 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         else:
             hvac_mode = None
         
-        # Position 19: Target setpoint temperature
-        temp_byte = data_area[19]
-        
-        # Validate temperature range (16-30°C typical for AC setpoints)
-        # When OFF or in FAN mode, temp byte might be 0x00 or 0x01, so handle that
-        if temp_byte in [0x00, 0x01]:
-            temperature = None  # No temperature setpoint (OFF or FAN mode)
-        elif 16 <= temp_byte <= 35:
-            temperature = temp_byte
-        else:
-            temperature = None  # Invalid range
-        
         # ═══════════════════════════════════════════════════════════════
         # END FIXED POSITION PARSING
         # ═══════════════════════════════════════════════════════════════
@@ -515,7 +512,7 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
             f"✓ Parsed Type 0x18 packet: {subnet}.{device_id} | "
             f"ON={is_on} | Temp={temperature}°C | Mode={mode_str}"
         )
-        _LOGGER.debug(f"  Position 16 (ON/OFF): 0x{on_off_byte:02x}, Position 18 (Mode): 0x{mode_byte:02x}, Position 19 (Temp): 0x{temp_byte:02x}")
+        _LOGGER.debug(f"  Position 11 (Temp): 0x{temp_byte:02x}, Position 15 (ON/OFF): 0x{on_off_byte:02x}, Position 17 (Mode): 0x{mode_byte:02x}")
         
         return {
             'subnet': subnet,
