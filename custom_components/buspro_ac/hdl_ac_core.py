@@ -404,7 +404,11 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         }
         Returns None if packet is not a valid AC status/command packet
     """
+    import binascii
+    
     try:
+        _LOGGER.debug(f"📦 Parsing packet: {len(packet)} bytes - {binascii.hexlify(packet).decode()}")
+        
         # Find AA AA marker to extract frame
         aa_pos = -1
         for i in range(len(packet) - 1):
@@ -413,39 +417,52 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
                 break
         
         if aa_pos < 0:
+            _LOGGER.warning(f"❌ No AA AA marker found in packet")
             return None
         
+        _LOGGER.debug(f"✓ Found AA AA at position {aa_pos}")
         frame = packet[aa_pos:]
         
         # Basic validation
         if len(frame) < 10:  # Minimum reasonable frame size
+            _LOGGER.warning(f"❌ Frame too short: {len(frame)} bytes (need at least 10)")
             return None
         
         if frame[0] != 0xAA or frame[1] != 0xAA:
+            _LOGGER.warning(f"❌ Frame doesn't start with AA AA")
             return None
         
         length = frame[2]
+        _LOGGER.debug(f"✓ Length byte: {length}")
         
         # Validate length
         expected_data_len = length - 1
         actual_data_len = len(frame) - 3
         
+        _LOGGER.debug(f"✓ Expected data: {expected_data_len} bytes, Actual: {actual_data_len} bytes")
+        
         if actual_data_len != expected_data_len:
+            _LOGGER.warning(f"❌ Length mismatch: expected {expected_data_len}, got {actual_data_len}")
             return None
         
         # Extract data area (skip AA AA and length byte)
         data_area = frame[3:-2]  # Exclude CRC bytes at end
+        
+        _LOGGER.debug(f"✓ Extracted data area: {len(data_area)} bytes")
         
         # Extract subnet and device_id
         # In STATUS broadcasts: positions 0-1 are target device (subnet, device)
         # In COMMAND packets: positions 6-7 are target device
         # We check positions 0-1 first (status broadcasts)
         if len(data_area) < 2:
+            _LOGGER.warning(f"❌ Data area too short: {len(data_area)} bytes (need at least 2)")
             return None
         
         # Try positions 0-1 first (status broadcast format)
         subnet = data_area[0]
         device_id = data_area[1]
+        
+        _LOGGER.warning(f"✅ PACKET PARSED! Device: {subnet}.{device_id}")
         
         # For status broadcasts, the structure is different than commands
         # We need to scan for likely temperature and mode values
