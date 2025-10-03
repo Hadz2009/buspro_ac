@@ -179,8 +179,8 @@ class HdlGateway:
                     # Receive packet
                     data, addr = self._sock.recvfrom(1024)
                     
-                    # Log received packet - ALWAYS show this
-                    _LOGGER.warning(f"🔔 PACKET RECEIVED: {len(data)} bytes from {addr[0]}:{addr[1]}")
+                    # Log received packet
+                    _LOGGER.debug(f"Packet received: {len(data)} bytes from {addr[0]}:{addr[1]}")
                     
                     # Parse status packet
                     status = parse_status_packet(data, self.protocol_schema)
@@ -189,8 +189,8 @@ class HdlGateway:
                         subnet = status['subnet']
                         device_id = status['device_id']
                         
-                        _LOGGER.warning(
-                            f"✅ PARSED STATUS for {subnet}.{device_id}: "
+                        _LOGGER.debug(
+                            f"Parsed status for {subnet}.{device_id}: "
                             f"on={status['is_on']}, temp={status['temperature']}, "
                             f"mode={status['hvac_mode']}"
                         )
@@ -198,22 +198,18 @@ class HdlGateway:
                         # Notify registered callbacks
                         with self._callbacks_lock:
                             key = (subnet, device_id)
-                            _LOGGER.warning(f"🔍 Looking for callbacks for {subnet}.{device_id}")
-                            _LOGGER.warning(f"🔍 Registered devices: {list(self._callbacks.keys())}")
                             
                             if key in self._callbacks:
-                                _LOGGER.warning(f"✅ Found {len(self._callbacks[key])} callback(s) for {subnet}.{device_id}")
+                                _LOGGER.debug(f"Notifying {len(self._callbacks[key])} callback(s) for {subnet}.{device_id}")
                                 for callback in self._callbacks[key]:
                                     try:
-                                        _LOGGER.warning(f"📞 Calling callback for {subnet}.{device_id}")
                                         callback(status)
-                                        _LOGGER.warning(f"✅ Callback completed for {subnet}.{device_id}")
                                     except Exception as e:
-                                        _LOGGER.error(f"❌ Error in status callback: {e}", exc_info=True)
+                                        _LOGGER.error(f"Error in status callback for {subnet}.{device_id}: {e}", exc_info=True)
                             else:
-                                _LOGGER.warning(f"⚠️ NO CALLBACKS registered for {subnet}.{device_id}!")
+                                _LOGGER.info(f"Status update from unconfigured device {subnet}.{device_id} (ignored)")
                     else:
-                        _LOGGER.warning(f"⚠️ Packet received but parse_status_packet returned None")
+                        _LOGGER.debug(f"Received packet could not be parsed as status update")
                     
                 except socket.timeout:
                     # Timeout is normal, just check if we should continue

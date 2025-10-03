@@ -94,12 +94,15 @@ class HdlAcClimate(ClimateEntity):
         self._attr_max_temp = 30
         self._attr_target_temperature_step = 1
         
+        # Track last status update and command to prevent feedback loops
+        import time
+        self._last_status_update = 0
+        self._last_command_sent = 0
+        
         # Register callback for status updates
         self._gateway.register_callback(subnet, device_id, self._handle_status_update)
         
-        _LOGGER.warning(
-            f"✅ REGISTERED callback for HDL AC: {name} (subnet={subnet}, device={device_id})"
-        )
+        _LOGGER.info(f"Registered HDL AC: {name} (subnet={subnet}, device={device_id})")
 
     @property
     def name(self):
@@ -183,6 +186,7 @@ class HdlAcClimate(ClimateEntity):
 
     def turn_on(self):
         """Turn AC on with current mode and temperature."""
+        import time
         try:
             # Map Home Assistant HVAC mode to HDL mode byte
             hvac_mode_map = {
@@ -204,6 +208,9 @@ class HdlAcClimate(ClimateEntity):
                 hvac_mode=hdl_mode
             )
             
+            # Track when we send commands to ignore immediate status echoes
+            self._last_command_sent = time.time()
+            
             # Send via gateway
             success = self._gateway.send_packet(frame)
             
@@ -223,6 +230,7 @@ class HdlAcClimate(ClimateEntity):
 
     def turn_off(self):
         """Turn AC off."""
+        import time
         try:
             # Build OFF packet
             frame = build_packet(
@@ -231,6 +239,9 @@ class HdlAcClimate(ClimateEntity):
                 self._device_id,
                 self._gateway.protocol_schema
             )
+            
+            # Track when we send commands to ignore immediate status echoes
+            self._last_command_sent = time.time()
             
             # Send via gateway
             success = self._gateway.send_packet(frame)
@@ -252,41 +263,87 @@ class HdlAcClimate(ClimateEntity):
         Args:
             status: Dictionary with 'is_on', 'temperature', 'hvac_mode' keys
         """
-        _LOGGER.warning(f"🎯 _handle_status_update called for {self._name} with status: {status}")
+        import time
+        
+        current_time = time.time()
+        
+        # Ignore status updates that come within 2 seconds of sending a command
+        # (prevents feedback loop where our command triggers a broadcast that overwrites our change)
+        if current_time - self._last_command_sent < 2.0:
+            _LOGGER.warning(f"⏭️ Ignoring status update (within 2s of command) for {self._name}")
+            return
+        
+        _LOGGER.warning(f"🎯 Status update for {self._name}: {status}")
+        _LOGGER.warning(f"   Current state: mode={self._hvac_mode}, temp={self._target_temperature}")
+        
+        # Store pending updates temporarily
+        self._pending_temp = status.get('temperature')
+        self._pending_mode = status.get('hvac_mode')
+        self._last_status_update = current_time
+        
+        # Apply updates after a short delay (0.5 seconds) to allow multiple rapid
+        # broadcasts to settle on the final value
+        import threading
+        def apply_update():
+            time.sleep(0.5)
+            # Only apply if no newer update has arrived
+            if current_time == self._last_status_update:
+                self._apply_status_update(status)
+        
+        threading.Thread(target=apply_update, daemon=True).start()
+    
+    def _apply_status_update(self, status: dict):
+        """Apply the status update after debounce delay."""
+        _LOGGER.warning(f"📝 Applying status update for {self._name}: {status}")
         
         try:
             updated = False
             
-            # Update ON/OFF state
-            if status['is_on'] is not None:
-                if status['is_on']:
-                    # AC is ON - determine mode
-                    if status['hvac_mode'] == HVAC_MODE_COOL:
-                        new_mode = HVACMode.COOL
-                    elif status['hvac_mode'] == HVAC_MODE_FAN:
-                        new_mode = HVACMode.FAN_ONLY
-                    elif status['hvac_mode'] == HVAC_MODE_DRY:
-                        new_mode = HVACMode.DRY
-                    else:
-                        new_mode = HVACMode.COOL  # Default to COOL
-                    
-                    if self._hvac_mode != new_mode:
-                        self._hvac_mode = new_mode
-                        updated = True
-                        _LOGGER.info(f"{self._name}: Mode updated to {new_mode}")
+            # Update HVAC mode first (if available, regardless of is_on state)
+            if status['hvac_mode'] is not None:
+                # Map HDL mode to Home Assistant mode
+                if status['hvac_mode'] == HVAC_MODE_COOL:
+                    new_mode = HVACMode.COOL
+                elif status['hvac_mode'] == HVAC_MODE_FAN:
+                    new_mode = HVACMode.FAN_ONLY
+                elif status['hvac_mode'] == HVAC_MODE_DRY:
+                    new_mode = HVACMode.DRY
                 else:
-                    # AC is OFF
-                    if self._hvac_mode != HVACMode.OFF:
-                        self._hvac_mode = HVACMode.OFF
-                        updated = True
-                        _LOGGER.info(f"{self._name}: Turned OFF (from panel)")
+                    new_mode = None  # Unknown mode
+                
+                # Update mode if we determined one AND it's different
+                if new_mode is not None:
+                    # Check if AC is on based on is_on flag
+                    if status['is_on'] is True:
+                        # AC is ON with a specific mode
+                        if self._hvac_mode != new_mode:
+                            old_mode = self._hvac_mode
+                            self._hvac_mode = new_mode
+                            updated = True
+                            _LOGGER.warning(f"✅ {self._name}: Mode {old_mode} → {new_mode}")
+                    elif status['is_on'] is False:
+                        # AC is OFF
+                        if self._hvac_mode != HVACMode.OFF:
+                            old_mode = self._hvac_mode
+                            self._hvac_mode = HVACMode.OFF
+                            updated = True
+                            _LOGGER.warning(f"✅ {self._name}: Turned OFF (was {old_mode})")
+                    else:
+                        # is_on is None - mode change without power state
+                        # Still update mode if AC appears to be on (mode != OFF)
+                        if self._hvac_mode != HVACMode.OFF and self._hvac_mode != new_mode:
+                            old_mode = self._hvac_mode
+                            self._hvac_mode = new_mode
+                            updated = True
+                            _LOGGER.warning(f"✅ {self._name}: Mode {old_mode} → {new_mode} (power state unknown)")
             
-            # Update temperature
+            # Update temperature (always accept temperature changes)
             if status['temperature'] is not None:
                 if self._target_temperature != status['temperature']:
+                    old_temp = self._target_temperature
                     self._target_temperature = status['temperature']
                     updated = True
-                    _LOGGER.info(f"{self._name}: Temperature updated to {status['temperature']}°C")
+                    _LOGGER.warning(f"✅ {self._name}: Temp {old_temp}°C → {status['temperature']}°C")
             
             # If anything changed, update Home Assistant
             if updated:
@@ -294,7 +351,7 @@ class HdlAcClimate(ClimateEntity):
                 self.schedule_update_ha_state()
                 _LOGGER.warning(f"✅ State update scheduled for {self._name}")
             else:
-                _LOGGER.warning(f"ℹ️ No changes detected for {self._name}")
+                _LOGGER.warning(f"ℹ️ No changes for {self._name} (already in sync)")
                 
         except Exception as e:
             _LOGGER.error(f"❌ Error handling status update for {self._name}: {e}", exc_info=True)
