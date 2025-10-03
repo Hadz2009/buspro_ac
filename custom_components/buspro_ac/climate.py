@@ -97,8 +97,8 @@ class HdlAcClimate(ClimateEntity):
         # Register callback for status updates
         self._gateway.register_callback(subnet, device_id, self._handle_status_update)
         
-        _LOGGER.debug(
-            f"Initialized HDL AC: {name} (subnet={subnet}, device={device_id})"
+        _LOGGER.warning(
+            f"✅ REGISTERED callback for HDL AC: {name} (subnet={subnet}, device={device_id})"
         )
 
     @property
@@ -252,6 +252,8 @@ class HdlAcClimate(ClimateEntity):
         Args:
             status: Dictionary with 'is_on', 'temperature', 'hvac_mode' keys
         """
+        _LOGGER.warning(f"🎯 _handle_status_update called for {self._name} with status: {status}")
+        
         try:
             updated = False
             
@@ -288,8 +290,12 @@ class HdlAcClimate(ClimateEntity):
             
             # If anything changed, update Home Assistant
             if updated:
+                _LOGGER.warning(f"🔄 Scheduling state update for {self._name}")
                 self.schedule_update_ha_state()
+                _LOGGER.warning(f"✅ State update scheduled for {self._name}")
+            else:
+                _LOGGER.warning(f"ℹ️ No changes detected for {self._name}")
                 
         except Exception as e:
-            _LOGGER.error(f"Error handling status update for {self._name}: {e}")
+            _LOGGER.error(f"❌ Error handling status update for {self._name}: {e}", exc_info=True)
 
