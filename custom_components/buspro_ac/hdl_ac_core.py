@@ -462,44 +462,57 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         subnet = data_area[0]
         device_id = data_area[1]
         
-        _LOGGER.warning(f"✅ PACKET PARSED! Device: {subnet}.{device_id}")
+        _LOGGER.debug(f"✓ Extracted device address: {subnet}.{device_id}")
         
         # For status broadcasts, the structure is different than commands
         # We need to scan for likely temperature and mode values
         
         # Look for temperature (typically 16-35°C range)
         temperature = None
-        for i in range(len(data_area)):
-            if 16 <= data_area[i] <= 35:
-                # Found a potential temperature
-                # In your capture, position 10 had 0x19 (25°C)
-                if i >= 8:  # Temperature usually in later positions
-                    temperature = data_area[i]
-                    break
+        try:
+            for i in range(len(data_area)):
+                if 16 <= data_area[i] <= 35:
+                    # Found a potential temperature
+                    # In your capture, position 10 had 0x19 (25°C)
+                    if i >= 8:  # Temperature usually in later positions
+                        temperature = data_area[i]
+                        _LOGGER.debug(f"✓ Found temperature {temperature}°C at position {i}")
+                        break
+        except Exception as e:
+            _LOGGER.warning(f"⚠️ Error scanning for temperature: {e}")
         
         # Look for HVAC mode (0x00=COOL, 0x02=FAN, 0x04=DRY)
         hvac_mode = None
-        for i in range(len(data_area)):
-            if data_area[i] in [HVAC_MODE_COOL, HVAC_MODE_FAN, HVAC_MODE_DRY]:
-                # Found a potential mode byte
-                if i >= 8:  # Mode usually in later positions
-                    hvac_mode = data_area[i]
-                    break
+        try:
+            for i in range(len(data_area)):
+                if data_area[i] in [HVAC_MODE_COOL, HVAC_MODE_FAN, HVAC_MODE_DRY]:
+                    # Found a potential mode byte
+                    if i >= 8:  # Mode usually in later positions
+                        hvac_mode = data_area[i]
+                        _LOGGER.debug(f"✓ Found mode 0x{hvac_mode:02x} at position {i}")
+                        break
+        except Exception as e:
+            _LOGGER.warning(f"⚠️ Error scanning for mode: {e}")
         
         # Try to determine ON/OFF state
-        # Look for 0x01 (ON) or 0x00 (OFF) in typical opcode positions
         is_on = None
-        # Check various positions for on/off indicator
-        if len(data_area) > 8:
-            # Status broadcasts often have operation byte around position 8-9
-            if data_area[8] in [0x0a, 0x01]:  # 0x0a might indicate ON
-                is_on = True
-            elif data_area[8] == 0x00:
-                is_on = False
+        try:
+            # Check various positions for on/off indicator
+            if len(data_area) > 8:
+                # Status broadcasts often have operation byte around position 8-9
+                if data_area[8] in [0x0a, 0x01]:  # 0x0a might indicate ON
+                    is_on = True
+                    _LOGGER.debug(f"✓ Detected ON state (byte at pos 8 = 0x{data_area[8]:02x})")
+                elif data_area[8] == 0x00:
+                    is_on = False
+                    _LOGGER.debug(f"✓ Detected OFF state (byte at pos 8 = 0x{data_area[8]:02x})")
+        except Exception as e:
+            _LOGGER.warning(f"⚠️ Error detecting on/off state: {e}")
         
+        mode_str = f"0x{hvac_mode:02x}" if hvac_mode is not None else "None"
         _LOGGER.debug(
             f"Parsed status: subnet={subnet}, device={device_id}, "
-            f"on={is_on}, temp={temperature}, mode={hvac_mode:#04x if hvac_mode is not None else None}"
+            f"on={is_on}, temp={temperature}, mode={mode_str}"
         )
         _LOGGER.debug(f"  Raw data area (first 20 bytes): {' '.join(f'{b:02x}' for b in data_area[:20])}")
         
