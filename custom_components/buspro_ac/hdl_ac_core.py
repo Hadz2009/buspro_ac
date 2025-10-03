@@ -467,19 +467,20 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         # For status broadcasts, the structure is different than commands
         # We need to scan for likely temperature and mode values
         
-        # Look for temperature (typically 16-35°C range)
+        # Extract temperature from specific position 11
+        # HDL packets contain multiple temp values; position 11 is the target temperature
         temperature = None
         try:
-            for i in range(len(data_area)):
-                if 16 <= data_area[i] <= 35:
-                    # Found a potential temperature
-                    # In your capture, position 10 had 0x19 (25°C)
-                    if i >= 8:  # Temperature usually in later positions
-                        temperature = data_area[i]
-                        _LOGGER.debug(f"✓ Found temperature {temperature}°C at position {i}")
-                        break
+            if len(data_area) > 11:
+                temp_byte = data_area[11]
+                # Validate temperature range (16-35°C is typical for AC)
+                if 16 <= temp_byte <= 35:
+                    temperature = temp_byte
+                    _LOGGER.debug(f"✓ Found temperature {temperature}°C at position 11")
+                else:
+                    _LOGGER.debug(f"⚠️ Temperature at position 11 ({temp_byte}) out of normal range")
         except Exception as e:
-            _LOGGER.warning(f"⚠️ Error scanning for temperature: {e}")
+            _LOGGER.warning(f"⚠️ Error reading temperature: {e}")
         
         # Look for HVAC mode (0x00=COOL, 0x02=FAN, 0x04=DRY)
         hvac_mode = None
@@ -494,20 +495,33 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         except Exception as e:
             _LOGGER.warning(f"⚠️ Error scanning for mode: {e}")
         
-        # Try to determine ON/OFF state
+        # Determine ON/OFF state using multiple strategies
         is_on = None
         try:
-            # Check various positions for on/off indicator
+            # Strategy 1: Check position 8 for operation byte
             if len(data_area) > 8:
-                # Status broadcasts often have operation byte around position 8-9
-                if data_area[8] in [0x0a, 0x01]:  # 0x0a might indicate ON
+                op_byte = data_area[8]
+                if op_byte in [0x0a, 0x01]:  # ON indicators
                     is_on = True
-                    _LOGGER.debug(f"✓ Detected ON state (byte at pos 8 = 0x{data_area[8]:02x})")
-                elif data_area[8] == 0x00:
+                    _LOGGER.debug(f"✓ Detected ON state (byte at pos 8 = 0x{op_byte:02x})")
+                elif op_byte == 0x00:  # OFF indicator
                     is_on = False
-                    _LOGGER.debug(f"✓ Detected OFF state (byte at pos 8 = 0x{data_area[8]:02x})")
+                    _LOGGER.debug(f"✓ Detected OFF state (byte at pos 8 = 0x{op_byte:02x})")
             
-            # FALLBACK: If we have a valid HVAC mode, assume AC is ON
+            # Strategy 2: Check for invalid temperature (0xff or out of range) = likely OFF
+            if is_on is None and len(data_area) > 11:
+                temp_byte = data_area[11]
+                if temp_byte == 0xff or temp_byte < 10 or temp_byte > 40:
+                    is_on = False
+                    _LOGGER.debug(f"✓ Detected OFF state (invalid temp byte = 0x{temp_byte:02x})")
+            
+            # Strategy 3: Check position 10 for additional OFF indicators
+            if is_on is None and len(data_area) > 10:
+                if data_area[10] == 0xff:
+                    is_on = False
+                    _LOGGER.debug(f"✓ Detected OFF state (pos 10 = 0xff)")
+            
+            # Strategy 4 (FALLBACK): If we have a valid HVAC mode, assume AC is ON
             # (AC wouldn't report a mode like COOL/FAN/DRY if it was OFF)
             if is_on is None and hvac_mode is not None:
                 is_on = True

@@ -94,19 +94,11 @@ class HdlAcClimate(ClimateEntity):
         self._attr_max_temp = 30
         self._attr_target_temperature_step = 1
         
-        # Track last status update and command to prevent feedback loops
+        # Optimistic update pattern: track command timing and last known device state
         import time
-        self._last_status_update = 0
-        self._last_command_sent = 0
-        self._last_state_change = 0  # Track when state actually changed
-        # For revert protection: track BOTH old and new values
-        self._old_temp = None  # Previous temp before change
-        self._new_temp = None  # New temp after change
-        self._old_mode = None  # Previous mode before change
-        self._new_mode = None  # New mode after change
-        self._old_is_on = None  # Previous on/off before change
-        self._new_is_on = None  # New on/off after change
-        self._confirmation_count = 0  # Count confirmations of new state
+        self._last_command_sent = 0  # Timestamp when we sent a command from HA
+        self._last_status = {}  # Last status received from device
+        self._pending_command = None  # What we're waiting to be confirmed
         
         # Register callback for status updates
         self._gateway.register_callback(subnet, device_id, self._handle_status_update)
@@ -217,18 +209,13 @@ class HdlAcClimate(ClimateEntity):
                 hvac_mode=hdl_mode
             )
             
-            # Track when we send commands to ignore immediate status echoes
+            # Optimistic update: record what we're sending
             self._last_command_sent = time.time()
-            self._last_state_change = time.time()
-            self._confirmation_count = 0
-            
-            # Protect the values we're sending from being reverted
-            self._old_temp = self._target_temperature  # Current temp
-            self._new_temp = self._target_temperature  # Sending same temp
-            self._old_mode = self._hvac_mode if self._hvac_mode != HVACMode.OFF else None
-            self._new_mode = hdl_mode
-            self._old_is_on = self._hvac_mode != HVACMode.OFF
-            self._new_is_on = True  # Turning ON
+            self._pending_command = {
+                'is_on': True,
+                'temperature': self._target_temperature,
+                'hvac_mode': hdl_mode
+            }
             
             # Send via gateway
             success = self._gateway.send_packet(frame)
@@ -259,18 +246,13 @@ class HdlAcClimate(ClimateEntity):
                 self._gateway.protocol_schema
             )
             
-            # Track when we send commands to ignore immediate status echoes
+            # Optimistic update: record what we're sending (OFF command)
             self._last_command_sent = time.time()
-            self._last_state_change = time.time()
-            self._confirmation_count = 0
-            
-            # Protect OFF state from being reverted
-            self._old_temp = self._target_temperature
-            self._new_temp = self._target_temperature  # Temp stays same
-            self._old_mode = self._hvac_mode
-            self._new_mode = None  # No mode when OFF
-            self._old_is_on = True
-            self._new_is_on = False  # Turning OFF
+            self._pending_command = {
+                'is_on': False,
+                'temperature': self._target_temperature,  # Preserve temperature
+                'hvac_mode': None
+            }
             
             # Send via gateway
             success = self._gateway.send_packet(frame)
@@ -287,8 +269,12 @@ class HdlAcClimate(ClimateEntity):
     
     def _handle_status_update(self, status: dict):
         """
-        Handle status update from gateway broadcast.
-        SMART REVERT PROTECTION: Blocks OLD values, confirms NEW values.
+        Handle status update from gateway broadcast using optimistic update pattern.
+        
+        Optimistic updates:
+        - UI updates immediately when HA sends command (instant feedback)
+        - Ignore device status for 2-3s after sending command (device processing)
+        - After window, accept whatever device reports as truth
         
         Args:
             status: Dictionary with 'is_on', 'temperature', 'hvac_mode' keys
@@ -297,123 +283,37 @@ class HdlAcClimate(ClimateEntity):
         
         current_time = time.time()
         
-        # Ignore status updates that come within 2 seconds of sending a command FROM HA
-        if current_time - self._last_command_sent < 2.0:
-            _LOGGER.debug(f"⏭️ Ignoring status update (within 2s of HA command) for {self._name}")
+        # OPTIMISTIC UPDATE WINDOW: Ignore device status for 2.5s after sending HA command
+        # This gives device time to process and prevents fighting with our own commands
+        command_window_active = (current_time - self._last_command_sent) < 2.5
+        
+        if command_window_active:
+            _LOGGER.debug(
+                f"⏭️ Ignoring status update during command window for {self._name} "
+                f"(sent {current_time - self._last_command_sent:.1f}s ago)"
+            )
             return
         
         _LOGGER.info(f"🎯 Received status update for {self._name}: {status}")
         
-        # Ignore DRY mode broadcasts since we removed it
+        # Ignore DRY mode broadcasts since we removed it from UI
         if status['hvac_mode'] == HVAC_MODE_DRY:
             _LOGGER.debug(f"Ignoring DRY mode broadcast for {self._name}")
             return
         
-        # Determine current is_on state
-        current_is_on = self._hvac_mode != HVACMode.OFF
+        # Store as last known device state
+        self._last_status = status.copy()
         
-        # Check for changes
-        temp_changed = status['temperature'] is not None and status['temperature'] != self._target_temperature
-        is_on_changed = status['is_on'] is not None and status['is_on'] != current_is_on
-        mode_changed = False
+        # Clear pending command (device has now reported state)
+        if self._pending_command:
+            _LOGGER.debug(f"✅ Clearing pending command for {self._name}")
+            self._pending_command = None
         
-        if status['hvac_mode'] is not None:
-            if status['hvac_mode'] == HVAC_MODE_COOL:
-                mode_changed = self._hvac_mode != HVACMode.COOL and self._hvac_mode != HVACMode.OFF
-            elif status['hvac_mode'] == HVAC_MODE_FAN:
-                mode_changed = self._hvac_mode != HVACMode.FAN_ONLY and self._hvac_mode != HVACMode.OFF
-        
-        is_change = temp_changed or mode_changed or is_on_changed
-        
-        # Protection window: 2 seconds after a change
-        protection_active = (current_time - self._last_state_change) < 2.0
-        
-        if protection_active:
-            # Check if this broadcast is CONFIRMING the new values
-            is_confirming_temp = (
-                self._new_temp is not None and
-                status['temperature'] == self._new_temp
-            )
-            is_confirming_mode = (
-                self._new_mode is not None and
-                status['hvac_mode'] == self._new_mode
-            )
-            is_confirming_on = (
-                self._new_is_on is not None and
-                status['is_on'] == self._new_is_on
-            )
-            
-            # Check if this broadcast is REVERTING to old values
-            is_reverting_temp = (
-                self._old_temp is not None and
-                status['temperature'] is not None and
-                status['temperature'] == self._old_temp and
-                status['temperature'] != self._new_temp
-            )
-            is_reverting_mode = (
-                self._old_mode is not None and
-                status['hvac_mode'] is not None and
-                status['hvac_mode'] == self._old_mode and
-                status['hvac_mode'] != self._new_mode
-            )
-            is_reverting_on = (
-                self._old_is_on is not None and
-                status['is_on'] is not None and
-                status['is_on'] == self._old_is_on and
-                status['is_on'] != self._new_is_on
-            )
-            
-            if is_reverting_temp or is_reverting_mode or is_reverting_on:
-                _LOGGER.warning(
-                    f"🚫 REJECTING revert for {self._name}: "
-                    f"Trying to revert temp={self._new_temp}°C→{status['temperature']}°C, "
-                    f"mode={self._new_mode}→{status['hvac_mode']}, on={self._new_is_on}→{status['is_on']}"
-                )
-                return
-            
-            # If confirming, count it
-            if is_confirming_temp or is_confirming_mode or is_confirming_on:
-                self._confirmation_count += 1
-                _LOGGER.debug(f"✓ Confirmation #{self._confirmation_count} for {self._name}")
-                
-                # After 2 confirmations, clear protection
-                if self._confirmation_count >= 2:
-                    _LOGGER.info(f"✅ State confirmed for {self._name}, clearing protection")
-                    self._old_temp = None
-                    self._new_temp = None
-                    self._old_mode = None
-                    self._new_mode = None
-                    self._old_is_on = None
-                    self._new_is_on = None
-                    self._confirmation_count = 0
-        
-        # Accept the change
-        if is_change:
-            _LOGGER.info(f"✅ ACCEPTING change for {self._name}")
-            self._last_state_change = current_time
-            self._confirmation_count = 0  # Reset confirmation counter
-            
-            # Store old and new values for protection
-            if temp_changed:
-                self._old_temp = self._target_temperature
-                self._new_temp = status['temperature']
-            if mode_changed:
-                self._old_mode = self._hvac_mode
-                self._new_mode = status['hvac_mode']
-            if is_on_changed:
-                self._old_is_on = current_is_on
-                self._new_is_on = status['is_on']
-        else:
-            _LOGGER.debug(f"ℹ️ No change for {self._name}")
-        
-        # Update timestamp
-        self._last_status_update = current_time
-        
-        # Apply the update
+        # Apply the device status to HA state (device is source of truth)
         self._apply_status_update(status)
     
     def _apply_status_update(self, status: dict):
-        """Apply the status update immediately."""
+        """Apply the status update immediately, preserving temperature when going OFF."""
         try:
             updated = False
             changes = []
@@ -443,12 +343,12 @@ class HdlAcClimate(ClimateEntity):
                             updated = True
                             changes.append(f"mode: {old_mode} → {new_mode}")
                     elif status['is_on'] is False:
-                        # AC is OFF
+                        # AC is OFF - preserve temperature
                         if self._hvac_mode != HVACMode.OFF:
                             old_mode = self._hvac_mode
                             self._hvac_mode = HVACMode.OFF
                             updated = True
-                            changes.append(f"mode: {old_mode} → OFF")
+                            changes.append(f"mode: {old_mode} → OFF (temp preserved: {self._target_temperature}°C)")
                     else:
                         # is_on is None but we have a mode - AC is probably ON
                         # Apply the mode change regardless of current state
@@ -458,20 +358,27 @@ class HdlAcClimate(ClimateEntity):
                             updated = True
                             changes.append(f"mode: {old_mode} → {new_mode}")
             elif status['is_on'] is False:
-                # No mode but explicitly OFF
+                # No mode but explicitly OFF - preserve temperature
                 if self._hvac_mode != HVACMode.OFF:
                     old_mode = self._hvac_mode
                     self._hvac_mode = HVACMode.OFF
                     updated = True
-                    changes.append(f"mode: {old_mode} → OFF")
+                    changes.append(f"mode: {old_mode} → OFF (temp preserved: {self._target_temperature}°C)")
             
-            # Update temperature (always accept temperature changes)
-            if status['temperature'] is not None:
+            # Update temperature ONLY if AC is ON or if temperature is explicitly provided
+            # When AC is OFF, preserve the existing target temperature
+            if status['temperature'] is not None and status['is_on'] is not False:
                 if self._target_temperature != status['temperature']:
                     old_temp = self._target_temperature
                     self._target_temperature = status['temperature']
                     updated = True
                     changes.append(f"temp: {old_temp}°C → {status['temperature']}°C")
+            elif status['temperature'] is not None and status['is_on'] is False:
+                # AC is OFF but has temperature - log but don't update
+                _LOGGER.debug(
+                    f"AC is OFF, preserving target temp {self._target_temperature}°C "
+                    f"(device reported {status['temperature']}°C)"
+                )
             
             # If anything changed, update Home Assistant
             if updated:
