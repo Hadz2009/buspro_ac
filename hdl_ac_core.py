@@ -1,0 +1,330 @@
+"""
+HDL AC Control - Core Protocol Implementation
+==============================================
+Learns protocol structure from templates and dynamically builds packets
+for any device address with correct CRC calculation.
+
+Uses exact HDL Pascal CRC-16 CCITT algorithm (polynomial 0x1021).
+"""
+
+import json
+import binascii
+import logging
+from typing import Tuple, Dict, List
+from pathlib import Path
+
+_LOGGER = logging.getLogger(__name__)
+
+# ============================================================================
+# CRC-16 CCITT HDL Pascal Implementation
+# ============================================================================
+
+def generate_crc_table() -> List[int]:
+    """Generate 256-entry CRC table for HDL CRC-16 CCITT"""
+    table = []
+    for i in range(256):
+        crc = i << 8  # Shift byte to high position
+        for _ in range(8):
+            if crc & 0x8000:  # Check high bit
+                crc = (crc << 1) ^ 0x1021
+            else:
+                crc = crc << 1
+            crc &= 0xFFFF
+        table.append(crc)
+    return table
+
+
+CRC_TABLE = generate_crc_table()
+
+
+def compute_hdl_crc(data_with_length: bytes) -> Tuple[int, int, int]:
+    """
+    Compute HDL CRC-16 CCITT including length byte, excluding the 2 CRC bytes at end.
+    Matches Pascal hdlPackCRC routine.
+    
+    Args:
+        data_with_length: [Length byte] + [Data bytes] where last 2 bytes are CRC positions
+        
+    Returns:
+        (crc_hi, crc_lo, crc_16bit)
+    """
+    crc = 0x0000
+    # Process everything except the last 2 CRC bytes
+    data_len = len(data_with_length) - 2
+    
+    for i in range(data_len):
+        byte = data_with_length[i]
+        idx = ((crc >> 8) ^ byte) & 0xFF
+        crc = ((crc << 8) & 0xFFFF) ^ CRC_TABLE[idx]
+        crc &= 0xFFFF
+    
+    crc_hi = (crc >> 8) & 0xFF
+    crc_lo = crc & 0xFF
+    
+    return crc_hi, crc_lo, crc
+
+
+def append_hdl_crc(length_and_data: bytearray) -> None:
+    """
+    Compute and write CRC to last 2 bytes in place.
+    Format: [CRCHi, CRCLo]
+    
+    Args:
+        length_and_data: [Length byte] + [Data bytes] with 2 trailing CRC positions
+    """
+    crc_hi, crc_lo, _ = compute_hdl_crc(length_and_data)
+    length_and_data[-2] = crc_hi
+    length_and_data[-1] = crc_lo
+
+
+# ============================================================================
+# Frame Parsing & Validation
+# ============================================================================
+
+def split_packet(hex_string: str) -> Tuple[bytes, bytes]:
+    """
+    Split packet into prefix and frame.
+    
+    Returns:
+        (prefix, frame) where frame starts at 0xAA 0xAA
+    """
+    hex_clean = ''.join(c for c in hex_string.lower() if c in '0123456789abcdef')
+    packet_bytes = binascii.unhexlify(hex_clean)
+    
+    # Find AA AA marker
+    aa_pos = -1
+    for i in range(len(packet_bytes) - 1):
+        if packet_bytes[i] == 0xAA and packet_bytes[i + 1] == 0xAA:
+            aa_pos = i
+            break
+    
+    if aa_pos < 0:
+        raise ValueError("0xAA 0xAA marker not found in packet")
+    
+    prefix = packet_bytes[:aa_pos]
+    frame = packet_bytes[aa_pos:]
+    
+    return prefix, frame
+
+
+def validate_frame(frame: bytes, name: str) -> None:
+    """
+    Validate frame structure and CRC.
+    Frame format: AA AA [Length] [Data area including 2 CRC bytes]
+    
+    Note: Length byte includes itself in the count!
+    So if Length = 21, there are 20 more bytes after it.
+    
+    Raises ValueError if validation fails.
+    """
+    if len(frame) < 4:
+        raise ValueError(f"{name}: Frame too short (< 4 bytes)")
+    
+    if frame[0] != 0xAA or frame[1] != 0xAA:
+        raise ValueError(f"{name}: Frame does not start with 0xAA 0xAA")
+    
+    length = frame[2]
+    
+    # Length includes itself, so data area = length - 1
+    expected_data_len = length - 1
+    actual_data_len = len(frame) - 3
+    
+    if actual_data_len != expected_data_len:
+        raise ValueError(
+            f"{name}: Frame length mismatch. "
+            f"Length byte = {length} (expects {expected_data_len} data bytes), "
+            f"actual data = {actual_data_len} bytes"
+        )
+    
+    # Extract length byte + data area for CRC calculation
+    length_and_data = frame[2:]  # From length byte onwards
+    
+    if len(length_and_data) < 3:  # Need at least length + 2 CRC bytes
+        raise ValueError(f"{name}: Data too short for CRC")
+    
+    # Extract stored CRC (last 2 bytes)
+    stored_crc_hi = length_and_data[-2]
+    stored_crc_lo = length_and_data[-1]
+    
+    # Compute CRC (includes length byte, excludes CRC bytes)
+    computed_hi, computed_lo, _ = compute_hdl_crc(length_and_data)
+    
+    if stored_crc_hi != computed_hi or stored_crc_lo != computed_lo:
+        raise ValueError(
+            f"{name}: CRC MISMATCH!\n"
+            f"  Stored:   {stored_crc_hi:02X} {stored_crc_lo:02X}\n"
+            f"  Computed: {computed_hi:02X} {computed_lo:02X}\n"
+            f"  Frame: {binascii.hexlify(frame).decode()}"
+        )
+
+
+# ============================================================================
+# Protocol Field Discovery
+# ============================================================================
+
+def discover_protocol(templates: Dict[str, str], silent: bool = False) -> Dict:
+    """
+    Auto-discover protocol field positions by comparing templates.
+    
+    Args:
+        templates: Dictionary with 'off', 'on', 'on_1.14' hex strings
+        silent: If True, suppress logging output
+    
+    Returns dict with:
+        - address_positions: byte indices that change between devices
+        - opcode_positions: byte indices that change between on/off
+        - base_off_frame: off template frame
+        - base_on_frame: on template frame
+        - prefix: packet prefix (before AA AA)
+    """
+    if not silent:
+        _LOGGER.info("Starting protocol auto-discovery")
+    
+    # Load and validate all three frames
+    if 'off' not in templates:
+        raise ValueError("Missing 'off' template for 1.13")
+    if 'on' not in templates:
+        raise ValueError("Missing 'on' template for 1.13")
+    if 'on_1.14' not in templates:
+        raise ValueError("Missing 'on_1.14' template")
+    
+    if not silent:
+        _LOGGER.debug("Validating frames and CRC...")
+    
+    prefix_off, frame_off = split_packet(templates['off'])
+    validate_frame(frame_off, "off")
+    
+    prefix_on, frame_on = split_packet(templates['on'])
+    validate_frame(frame_on, "on")
+    
+    prefix_on_14, frame_on_14 = split_packet(templates['on_1.14'])
+    validate_frame(frame_on_14, "on_1.14")
+    
+    if not silent:
+        _LOGGER.debug("All frames validated successfully")
+    
+    # Extract data areas (skip AA AA and length byte)
+    # Exclude last 2 CRC bytes from comparison
+    data_off = frame_off[3:-2]
+    data_on = frame_on[3:-2]
+    data_on_14 = frame_on_14[3:-2]
+    
+    # Compare off vs on (same device 1.13) to find ON/OFF control byte
+    opcode_positions = []
+    for i in range(min(len(data_off), len(data_on))):
+        if data_off[i] != data_on[i]:
+            opcode_positions.append(i)
+    
+    if not opcode_positions:
+        raise ValueError("Could not discover opcode positions (off vs on identical)")
+    
+    if not silent:
+        _LOGGER.debug(f"Discovered opcode positions: {opcode_positions}")
+    
+    # Compare on_1.13 vs on_1.14 (same opcode, different device)
+    address_positions = []
+    for i in range(min(len(data_on), len(data_on_14))):
+        if data_on[i] != data_on_14[i]:
+            address_positions.append(i)
+    
+    if not address_positions:
+        raise ValueError("Could not discover address positions (on vs on_1.14 identical)")
+    
+    if not silent:
+        _LOGGER.debug(f"Discovered address positions: {address_positions}")
+        _LOGGER.info("Protocol discovery complete")
+    
+    return {
+        'address_positions': address_positions,
+        'opcode_positions': opcode_positions,
+        'base_off_frame': frame_off,
+        'base_on_frame': frame_on,
+        'prefix': prefix_off,
+    }
+
+
+# ============================================================================
+# Packet Builder
+# ============================================================================
+
+def build_packet(verb: str, subnet: int, device: int, schema: Dict) -> bytes:
+    """
+    Build a packet for given verb and device address.
+    
+    Args:
+        verb: "on" or "off"
+        subnet: subnet number (e.g., 1)
+        device: device number (e.g., 13)
+        schema: protocol schema from discover_protocol()
+        
+    Returns:
+        Complete frame bytes (starting with AA AA)
+    """
+    # Choose base template
+    if verb.lower() == "off":
+        base_frame = schema['base_off_frame']
+    elif verb.lower() == "on":
+        base_frame = schema['base_on_frame']
+    else:
+        raise ValueError(f"Unknown verb: {verb}. Use 'on' or 'off'")
+    
+    # Copy to mutable buffer
+    frame = bytearray(base_frame)
+    
+    # Data area starts at position 3 (after AA AA and length byte)
+    data_area_offset = 3
+    
+    # HDL protocol structure: positions 6-7 are typically [subnet, device]
+    address_positions = schema['address_positions']
+    
+    # Standard HDL BusPro: byte 6 = subnet, byte 7 = device
+    frame[data_area_offset + 6] = subnet
+    frame[data_area_offset + 7] = device
+    
+    # Handle other discovered address positions
+    for pos in address_positions:
+        if pos == 6:
+            frame[data_area_offset + pos] = subnet
+        elif pos == 7:
+            frame[data_area_offset + pos] = device
+    
+    # Extract data area
+    data_area = frame[data_area_offset:]
+    
+    # Update length byte (length includes itself!)
+    frame[2] = len(data_area) + 1
+    
+    # Recompute and append CRC (includes length byte)
+    length_and_data = bytearray(frame[2:])
+    append_hdl_crc(length_and_data)
+    
+    # Write back length byte + data area with new CRC
+    frame[2:] = length_and_data
+    
+    return bytes(frame)
+
+
+# ============================================================================
+# Template Loading
+# ============================================================================
+
+def load_templates(templates_path: str) -> Dict[str, str]:
+    """
+    Load templates from JSON file.
+    
+    Args:
+        templates_path: Path to templates.json file
+        
+    Returns:
+        Dictionary of templates
+    """
+    try:
+        with open(templates_path, 'r') as f:
+            templates = json.load(f)
+        _LOGGER.debug(f"Loaded templates from {templates_path}")
+        return templates
+    except FileNotFoundError:
+        raise ValueError(f"Templates file not found: {templates_path}")
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in templates file: {e}")
+
