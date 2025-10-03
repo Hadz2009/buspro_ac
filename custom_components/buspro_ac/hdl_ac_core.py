@@ -16,6 +16,14 @@ from pathlib import Path
 _LOGGER = logging.getLogger(__name__)
 
 # ============================================================================
+# HVAC Mode Constants
+# ============================================================================
+
+HVAC_MODE_COOL = 0x00
+HVAC_MODE_FAN = 0x02
+HVAC_MODE_DRY = 0x04
+
+# ============================================================================
 # CRC-16 CCITT HDL Pascal Implementation
 # ============================================================================
 
@@ -167,20 +175,24 @@ def discover_protocol(templates: Dict[str, str], silent: bool = False) -> Dict:
     Auto-discover protocol field positions by comparing templates.
     
     Args:
-        templates: Dictionary with 'off', 'on', 'on_1.14' hex strings
+        templates: Dictionary with 'off', 'on', 'on_1.14' hex strings, 
+                   and optionally temperature/mode templates
         silent: If True, suppress logging output
     
     Returns dict with:
         - address_positions: byte indices that change between devices
         - opcode_positions: byte indices that change between on/off
+        - temperature_position: byte index for temperature setting
+        - mode_position: byte index for HVAC mode
         - base_off_frame: off template frame
         - base_on_frame: on template frame
+        - base_cool_frame: cool mode template frame (if available)
         - prefix: packet prefix (before AA AA)
     """
     if not silent:
         _LOGGER.info("Starting protocol auto-discovery")
     
-    # Load and validate all three frames
+    # Load and validate required frames
     if 'off' not in templates:
         raise ValueError("Missing 'off' template for 1.13")
     if 'on' not in templates:
@@ -232,13 +244,57 @@ def discover_protocol(templates: Dict[str, str], silent: bool = False) -> Dict:
     
     if not silent:
         _LOGGER.debug(f"Discovered address positions: {address_positions}")
+    
+    # Discover temperature and mode positions (if templates available)
+    temperature_position = None
+    mode_position = None
+    base_cool_frame = None
+    
+    if 'cool_23c' in templates and 'fan_24c' in templates:
+        if not silent:
+            _LOGGER.debug("Discovering temperature and mode positions...")
+        
+        _, frame_cool_23 = split_packet(templates['cool_23c'])
+        validate_frame(frame_cool_23, "cool_23c")
+        
+        _, frame_fan_24 = split_packet(templates['fan_24c'])
+        validate_frame(frame_fan_24, "fan_24c")
+        
+        data_cool_23 = frame_cool_23[3:-2]
+        data_fan_24 = frame_fan_24[3:-2]
+        
+        # Compare cool_23c vs fan_24c to find mode byte
+        # (temperature changes from 0x17 to 0x18 AND mode changes from 0x00 to 0x02)
+        differences = []
+        for i in range(min(len(data_cool_23), len(data_fan_24))):
+            if data_cool_23[i] != data_fan_24[i]:
+                differences.append((i, data_cool_23[i], data_fan_24[i]))
+        
+        # Temperature byte: 0x17 (23°C) vs 0x18 (24°C) - difference of 1
+        # Mode byte: 0x00 (cool) vs 0x02 (fan) - difference of 2
+        for i, val_23, val_24 in differences:
+            if val_24 - val_23 == 1:
+                temperature_position = i
+            elif val_24 - val_23 == 2:
+                mode_position = i
+        
+        base_cool_frame = frame_cool_23
+        
+        if not silent:
+            _LOGGER.debug(f"Discovered temperature position: {temperature_position}")
+            _LOGGER.debug(f"Discovered mode position: {mode_position}")
+    
+    if not silent:
         _LOGGER.info("Protocol discovery complete")
     
     return {
         'address_positions': address_positions,
         'opcode_positions': opcode_positions,
+        'temperature_position': temperature_position,
+        'mode_position': mode_position,
         'base_off_frame': frame_off,
         'base_on_frame': frame_on,
+        'base_cool_frame': base_cool_frame,
         'prefix': prefix_off,
     }
 
@@ -247,15 +303,18 @@ def discover_protocol(templates: Dict[str, str], silent: bool = False) -> Dict:
 # Packet Builder
 # ============================================================================
 
-def build_packet(verb: str, subnet: int, device: int, schema: Dict) -> bytes:
+def build_packet(verb: str, subnet: int, device: int, schema: Dict, 
+                 temperature: int = None, hvac_mode: int = None) -> bytes:
     """
-    Build a packet for given verb and device address.
+    Build a packet for given verb, device address, temperature, and HVAC mode.
     
     Args:
         verb: "on" or "off"
         subnet: subnet number (e.g., 1)
         device: device number (e.g., 13)
         schema: protocol schema from discover_protocol()
+        temperature: target temperature in Celsius (16-30), optional
+        hvac_mode: HVAC mode (HVAC_MODE_COOL/FAN/DRY), optional
         
     Returns:
         Complete frame bytes (starting with AA AA)
@@ -264,7 +323,11 @@ def build_packet(verb: str, subnet: int, device: int, schema: Dict) -> bytes:
     if verb.lower() == "off":
         base_frame = schema['base_off_frame']
     elif verb.lower() == "on":
-        base_frame = schema['base_on_frame']
+        # Use cool frame if available and temperature/mode are being set
+        if schema.get('base_cool_frame') and (temperature is not None or hvac_mode is not None):
+            base_frame = schema['base_cool_frame']
+        else:
+            base_frame = schema['base_on_frame']
     else:
         raise ValueError(f"Unknown verb: {verb}. Use 'on' or 'off'")
     
@@ -287,6 +350,21 @@ def build_packet(verb: str, subnet: int, device: int, schema: Dict) -> bytes:
             frame[data_area_offset + pos] = subnet
         elif pos == 7:
             frame[data_area_offset + pos] = device
+    
+    # Set temperature if provided and position is known
+    if temperature is not None and schema.get('temperature_position') is not None:
+        temp_pos = schema['temperature_position']
+        # Temperature is direct hex encoding: 16°C = 0x10, 30°C = 0x1E
+        if 16 <= temperature <= 30:
+            frame[data_area_offset + temp_pos] = temperature
+        else:
+            _LOGGER.warning(f"Temperature {temperature}°C out of range (16-30), using as-is")
+            frame[data_area_offset + temp_pos] = temperature
+    
+    # Set HVAC mode if provided and position is known
+    if hvac_mode is not None and schema.get('mode_position') is not None:
+        mode_pos = schema['mode_position']
+        frame[data_area_offset + mode_pos] = hvac_mode
     
     # Extract data area
     data_area = frame[data_area_offset:]

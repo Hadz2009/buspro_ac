@@ -8,11 +8,11 @@ from homeassistant.components.climate.const import (
     HVACMode,
     ClimateEntityFeature,
 )
-from homeassistant.const import CONF_NAME, UnitOfTemperature
+from homeassistant.const import CONF_NAME, UnitOfTemperature, ATTR_TEMPERATURE
 import homeassistant.helpers.config_validation as cv
 
 from .const import DOMAIN, CONF_DEVICES, CONF_ADDRESS
-from .hdl_ac_core import build_packet
+from .hdl_ac_core import build_packet, HVAC_MODE_COOL, HVAC_MODE_FAN, HVAC_MODE_DRY
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,8 +87,12 @@ class HdlAcClimate(ClimateEntity):
         self._name = name
         self._subnet = subnet
         self._device_id = device_id
-        self._is_on = False
+        self._hvac_mode = HVACMode.OFF
+        self._target_temperature = 24  # Default temperature
         self._attr_temperature_unit = UnitOfTemperature.CELSIUS
+        self._attr_min_temp = 16
+        self._attr_max_temp = 30
+        self._attr_target_temperature_step = 1
         
         _LOGGER.debug(
             f"Initialized HDL AC: {name} (subnet={subnet}, device={device_id})"
@@ -107,45 +111,97 @@ class HdlAcClimate(ClimateEntity):
     @property
     def hvac_mode(self):
         """Return current HVAC mode."""
-        return HVACMode.COOL if self._is_on else HVACMode.OFF
+        return self._hvac_mode
 
     @property
     def hvac_modes(self):
         """Return the list of available HVAC modes."""
-        return [HVACMode.OFF, HVACMode.COOL]
+        return [HVACMode.OFF, HVACMode.COOL, HVACMode.FAN_ONLY, HVACMode.DRY]
 
     @property
     def supported_features(self):
         """Return the list of supported features."""
-        return ClimateEntityFeature(0)  # Basic on/off only for now
+        return ClimateEntityFeature.TARGET_TEMPERATURE
+    
+    @property
+    def target_temperature(self):
+        """Return the target temperature."""
+        return self._target_temperature
+    
+    @property
+    def min_temp(self):
+        """Return the minimum temperature."""
+        return self._attr_min_temp
+    
+    @property
+    def max_temp(self):
+        """Return the maximum temperature."""
+        return self._attr_max_temp
+    
+    @property
+    def target_temperature_step(self):
+        """Return the supported step of target temperature."""
+        return self._attr_target_temperature_step
 
     def set_hvac_mode(self, hvac_mode):
         """Set new target HVAC mode."""
         if hvac_mode == HVACMode.OFF:
             self.turn_off()
-        elif hvac_mode == HVACMode.COOL:
+        elif hvac_mode in [HVACMode.COOL, HVACMode.FAN_ONLY, HVACMode.DRY]:
+            self._hvac_mode = hvac_mode
             self.turn_on()
         else:
             _LOGGER.warning(f"Unsupported HVAC mode: {hvac_mode}")
+    
+    def set_temperature(self, **kwargs):
+        """Set new target temperature."""
+        temperature = kwargs.get(ATTR_TEMPERATURE)
+        if temperature is None:
+            return
+        
+        # Update target temperature
+        self._target_temperature = int(temperature)
+        
+        # If AC is currently on, send command with new temperature
+        if self._hvac_mode != HVACMode.OFF:
+            self.turn_on()
+        
+        self.schedule_update_ha_state()
 
     def turn_on(self):
-        """Turn AC on."""
+        """Turn AC on with current mode and temperature."""
         try:
-            # Build ON packet
+            # Map Home Assistant HVAC mode to HDL mode byte
+            hvac_mode_map = {
+                HVACMode.COOL: HVAC_MODE_COOL,
+                HVACMode.FAN_ONLY: HVAC_MODE_FAN,
+                HVACMode.DRY: HVAC_MODE_DRY,
+            }
+            
+            # Get HDL mode byte (default to COOL if not specified)
+            hdl_mode = hvac_mode_map.get(self._hvac_mode, HVAC_MODE_COOL)
+            
+            # Build ON packet with temperature and mode
             frame = build_packet(
                 "on",
                 self._subnet,
                 self._device_id,
-                self._gateway.protocol_schema
+                self._gateway.protocol_schema,
+                temperature=self._target_temperature,
+                hvac_mode=hdl_mode
             )
             
             # Send via gateway
             success = self._gateway.send_packet(frame)
             
             if success:
-                self._is_on = True
+                # Update state only if send was successful
+                if self._hvac_mode == HVACMode.OFF:
+                    self._hvac_mode = HVACMode.COOL  # Default to COOL when turning on
                 self.schedule_update_ha_state()
-                _LOGGER.info(f"Turned ON: {self._name}")
+                _LOGGER.info(
+                    f"Turned ON: {self._name} (mode={self._hvac_mode}, temp={self._target_temperature}°C)"
+                )
             else:
                 _LOGGER.error(f"Failed to turn ON: {self._name}")
                 
@@ -167,7 +223,7 @@ class HdlAcClimate(ClimateEntity):
             success = self._gateway.send_packet(frame)
             
             if success:
-                self._is_on = False
+                self._hvac_mode = HVACMode.OFF
                 self.schedule_update_ha_state()
                 _LOGGER.info(f"Turned OFF: {self._name}")
             else:
