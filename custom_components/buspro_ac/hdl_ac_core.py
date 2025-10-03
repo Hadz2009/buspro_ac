@@ -354,11 +354,11 @@ def build_packet(verb: str, subnet: int, device: int, schema: Dict,
     # Set temperature if provided and position is known
     if temperature is not None and schema.get('temperature_position') is not None:
         temp_pos = schema['temperature_position']
-        # Temperature is direct hex encoding: 16°C = 0x10, 30°C = 0x1E
-        if 16 <= temperature <= 30:
+        # Temperature is direct hex encoding: 18°C = 0x12, 30°C = 0x1E
+        if 18 <= temperature <= 30:
             frame[data_area_offset + temp_pos] = temperature
         else:
-            _LOGGER.warning(f"Temperature {temperature}°C out of range (16-30), using as-is")
+            _LOGGER.warning(f"Temperature {temperature}°C out of range (18-30), using as-is")
             frame[data_area_offset + temp_pos] = temperature
     
     # Set HVAC mode if provided and position is known
