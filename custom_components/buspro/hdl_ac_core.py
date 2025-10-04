@@ -464,12 +464,19 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
     Parse incoming status packet from HDL gateway broadcast.
     
     This parser uses FIXED byte positions discovered from real packet analysis.
-    Processes both Type 0x18 (temperature/mode) and Type 0x1A (fan speed) broadcasts.
+    Processes Type 0x18 (temperature/mode), 0x19 (extended status), and Type 0x1A (fan speed) broadcasts.
     
     Type 0x18 Packet Structure (after AA AA 18):
     Position 0-1:  Device address (subnet, device_id)
     Position 11:   Target setpoint temperature (0x15=21°C, 0x18=24°C, etc.)
     Position 15:   ON/OFF indicator (0x20=OFF, 0x01=ON COOL, 0x21=ON FAN)
+    Position 17:   HVAC mode (0x00=COOL, 0x02=FAN, 0x04=DRY)
+    
+    Type 0x19 Packet Structure (after AA AA 19):
+    Position 0-1:  Device address (subnet, device_id)
+    Position 10:   Target setpoint temperature (NOTE: Different from 0x18/0x1A!)
+    Position 15:   ON/OFF indicator
+    Position 16:   Fan speed (0x00=AUTO, 0x01=HIGH, 0x02=MEDIUM, 0x03=LOW)
     Position 17:   HVAC mode (0x00=COOL, 0x02=FAN, 0x04=DRY)
     
     Type 0x1A Packet Structure (after AA AA 1A):
@@ -523,9 +530,9 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         
         length = frame[2]
         
-        # ⭐ Process Type 0x18 (temperature/mode) and Type 0x1A (fan speed) broadcasts
-        if length not in [0x18, 0x1A]:
-            _LOGGER.debug(f"Ignoring non-0x18/0x1A packet (length={length:#04x})")
+        # ⭐ Process Type 0x18 (temperature/mode), 0x19 (extended status), and Type 0x1A (fan speed) broadcasts
+        if length not in [0x18, 0x19, 0x1A]:
+            _LOGGER.debug(f"Ignoring non-0x18/0x19/0x1A packet (length={length:#04x})")
             return None
         
         # Validate frame length matches
@@ -553,11 +560,17 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         subnet = data_area[0]
         device_id = data_area[1]
         
-        # Position 11: Target setpoint temperature
-        temp_byte = data_area[11]
+        # Temperature position varies by packet type:
+        # - Type 0x18: position 11
+        # - Type 0x19: position 10
+        # - Type 0x1A: position 11
+        if length == 0x19:
+            temp_byte = data_area[10] if len(data_area) > 10 else None
+        else:
+            temp_byte = data_area[11] if len(data_area) > 11 else None
         
         # Validate temperature range (16-35°C typical for AC setpoints)
-        if 16 <= temp_byte <= 35:
+        if temp_byte is not None and 16 <= temp_byte <= 35:
             temperature = temp_byte
         else:
             temperature = None  # Invalid range or not applicable
@@ -585,13 +598,13 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         else:
             hvac_mode = None
         
-        # Position 16: Fan speed (ONLY in 0x1A packets)
+        # Position 16: Fan speed (in 0x19 and 0x1A packets)
         # 0x00 = AUTO
         # 0x01 = HIGH
         # 0x02 = MEDIUM
         # 0x03 = LOW
         fan_speed = None
-        if length == 0x1A and len(data_area) > 16:
+        if length in [0x19, 0x1A] and len(data_area) > 16:
             fan_speed_byte = data_area[16]
             if fan_speed_byte in [0x00, 0x01, 0x02, 0x03]:
                 fan_speed = fan_speed_byte
