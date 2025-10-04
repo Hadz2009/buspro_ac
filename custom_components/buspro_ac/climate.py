@@ -144,6 +144,7 @@ class HdlAcClimate(ClimateEntity):
         self._device_id = device_id
         self._hvac_mode = HVACMode.OFF
         self._target_temperature = 24  # Default temperature
+        self._current_temperature = None  # Actual room temperature from sensor
         self._fan_mode = FAN_AUTO  # Default fan mode
         self._attr_temperature_unit = UnitOfTemperature.CELSIUS
         self._attr_min_temp = 18
@@ -179,8 +180,9 @@ class HdlAcClimate(ClimateEntity):
     @property
     def hvac_modes(self):
         """Return the list of available HVAC modes."""
-        # Only COOL and FAN modes (removed DRY/dehumidify as requested)
-        return [HVACMode.OFF, HVACMode.COOL, HVACMode.FAN_ONLY]
+        # Only COOL and FAN modes - OFF is handled by separate power button
+        # Removing OFF from this list makes HA show a separate power toggle
+        return [HVACMode.COOL, HVACMode.FAN_ONLY]
 
     @property
     def supported_features(self):
@@ -201,6 +203,11 @@ class HdlAcClimate(ClimateEntity):
     def target_temperature(self):
         """Return the target temperature."""
         return self._target_temperature
+    
+    @property
+    def current_temperature(self):
+        """Return the current temperature (from AC sensor)."""
+        return self._current_temperature
     
     @property
     def min_temp(self):
@@ -228,14 +235,17 @@ class HdlAcClimate(ClimateEntity):
         return [FAN_AUTO, FAN_HIGH, FAN_MEDIUM, FAN_LOW]
 
     def set_hvac_mode(self, hvac_mode):
-        """Set new target HVAC mode."""
-        if hvac_mode == HVACMode.OFF:
-            self.turn_off()
-        elif hvac_mode in [HVACMode.COOL, HVACMode.FAN_ONLY]:
+        """Set new target HVAC mode (COOL or FAN only - power is separate)."""
+        if hvac_mode in [HVACMode.COOL, HVACMode.FAN_ONLY]:
+            # Store the desired mode
+            old_mode = self._hvac_mode
             self._hvac_mode = hvac_mode
-            self.turn_on()
+            # If AC was already on (not OFF), apply the mode change immediately
+            if old_mode != HVACMode.OFF:
+                self.turn_on()
+            _LOGGER.info(f"Set HVAC mode to {hvac_mode} for {self._name}")
         else:
-            _LOGGER.warning(f"Unsupported HVAC mode: {hvac_mode}")
+            _LOGGER.warning(f"Unsupported HVAC mode: {hvac_mode}. Use turn_on/turn_off for power control.")
     
     def set_temperature(self, **kwargs):
         """Set new target temperature."""
@@ -523,6 +533,17 @@ class HdlAcClimate(ClimateEntity):
                     f"AC is OFF, preserving target temp {self._target_temperature}°C "
                     f"(device reported {status['temperature']}°C)"
                 )
+            
+            # Update current temperature (sensor reading) - always update when available
+            if status.get('current_temperature') is not None:
+                if self._current_temperature != status['current_temperature']:
+                    old_current = self._current_temperature
+                    self._current_temperature = status['current_temperature']
+                    updated = True
+                    if old_current is not None:
+                        changes.append(f"current: {old_current}°C → {status['current_temperature']}°C")
+                    else:
+                        changes.append(f"current: {status['current_temperature']}°C")
             
             # Update fan mode if present in status
             if status.get('fan_speed') is not None:

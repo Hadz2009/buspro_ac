@@ -468,6 +468,7 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
     
     Type 0x18 Packet Structure (after AA AA 18):
     Position 0-1:  Device address (subnet, device_id)
+    Position 10:   Current room temperature from sensor (0x1A=26°C actual reading)
     Position 11:   Target setpoint temperature (0x15=21°C, 0x18=24°C, etc.)
     Position 15:   ON/OFF indicator (0x20=OFF, 0x01=ON COOL, 0x21=ON FAN)
     Position 17:   HVAC mode (0x00=COOL, 0x02=FAN, 0x04=DRY)
@@ -481,6 +482,7 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
     
     Type 0x1A Packet Structure (after AA AA 1A):
     Position 0-1:  Device address (subnet, device_id)
+    Position 10:   Current room temperature from sensor
     Position 11:   Target setpoint temperature
     Position 15:   ON/OFF indicator
     Position 16:   Fan speed (0x00=AUTO, 0x01=HIGH, 0x02=MEDIUM, 0x03=LOW)
@@ -495,11 +497,12 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
             'subnet': int,
             'device_id': int,
             'is_on': bool,
-            'temperature': int or None,
+            'temperature': int or None (target setpoint temperature),
+            'current_temperature': int or None (actual room sensor reading),
             'hvac_mode': int or None (HVAC_MODE_COOL/FAN/DRY),
             'fan_speed': int or None (FAN_SPEED_AUTO/HIGH/MEDIUM/LOW)
         }
-        Returns None if packet is not a valid Type 0x18 or 0x1A status packet
+        Returns None if packet is not a valid Type 0x18, 0x19, or 0x1A status packet
     """
     import binascii
     
@@ -575,6 +578,25 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         else:
             temperature = None  # Invalid range or not applicable
         
+        # Current room temperature (sensor reading) - typically at position 10
+        # This is the actual measured temperature, not the setpoint
+        current_temp_byte = data_area[10] if len(data_area) > 10 else None
+        
+        # Exploratory logging to help identify current temp position
+        if len(data_area) > 13:
+            _LOGGER.debug(
+                f"  🔍 Temp exploration: Pos10=0x{data_area[10]:02x}({data_area[10]}°C), "
+                f"Pos11=0x{data_area[11]:02x}({data_area[11]}°C), "
+                f"Pos12=0x{data_area[12]:02x}({data_area[12]}°C), "
+                f"Pos13=0x{data_area[13]:02x}({data_area[13]}°C)"
+            )
+        
+        # Validate current temperature range (10-50°C wider range for actual readings)
+        if current_temp_byte is not None and 10 <= current_temp_byte <= 50:
+            current_temperature = current_temp_byte
+        else:
+            current_temperature = None  # Invalid range or not applicable
+        
         # ON/OFF position varies by packet type:
         # - Type 0x18: position 15 (0x20=OFF, 0x01=ON COOL, 0x21=ON FAN)
         # - Type 0x19: position 9 (0x00=OFF, 0x01=ON)
@@ -623,9 +645,9 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         
         _LOGGER.debug(
             f"✓ Parsed Type {packet_type} packet: {subnet}.{device_id} | "
-            f"ON={is_on} | Temp={temperature}°C | Mode={mode_str} | Fan={fan_str}"
+            f"ON={is_on} | Current={current_temperature}°C | Target={temperature}°C | Mode={mode_str} | Fan={fan_str}"
         )
-        _LOGGER.debug(f"  Position 11 (Temp): 0x{temp_byte:02x}, Position 15 (ON/OFF): 0x{on_off_byte:02x}, Position 17 (Mode): 0x{mode_byte:02x}")
+        _LOGGER.debug(f"  Position 10 (Current): 0x{current_temp_byte:02x}, Position 11 (Target): 0x{temp_byte:02x}, Position 15 (ON/OFF): 0x{on_off_byte:02x}, Position 17 (Mode): 0x{mode_byte:02x}")
         if fan_speed is not None:
             _LOGGER.debug(f"  Position 16 (Fan): 0x{fan_speed:02x}")
         
@@ -634,6 +656,7 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
             'device_id': device_id,
             'is_on': is_on,
             'temperature': temperature,
+            'current_temperature': current_temperature,
             'hvac_mode': hvac_mode,
             'fan_speed': fan_speed,
         }
