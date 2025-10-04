@@ -124,8 +124,8 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
             
             _LOGGER.info(f"✅ Initial status sync complete - waiting for device responses...")
         
-        # Schedule the status request task
-        hass.async_create_task(request_initial_status())
+        # Schedule the status request task (thread-safe)
+        asyncio.run_coroutine_threadsafe(request_initial_status(), hass.loop)
         
         return True
     
