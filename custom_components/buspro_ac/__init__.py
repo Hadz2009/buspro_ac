@@ -13,6 +13,8 @@ from .const import (
     DOMAIN,
     CONF_GATEWAY_IP,
     CONF_GATEWAY_PORT,
+    CONF_GATEWAYS,
+    CONF_SUBNET,
     DEFAULT_GATEWAY_IP,
     DEFAULT_GATEWAY_PORT,
     TEMPLATES_FILE,
@@ -21,11 +23,23 @@ from .hdl_ac_core import load_templates, discover_protocol, parse_status_packet
 
 _LOGGER = logging.getLogger(__name__)
 
-# Configuration schema
+# Gateway schema for multi-gateway configuration
+GATEWAY_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_SUBNET): cv.positive_int,
+        vol.Required(CONF_GATEWAY_IP): cv.string,
+        vol.Optional(CONF_GATEWAY_PORT, default=DEFAULT_GATEWAY_PORT): cv.port,
+    }
+)
+
+# Configuration schema supporting both old and new formats
 CONFIG_SCHEMA = vol.Schema(
     {
         DOMAIN: vol.Schema(
             {
+                # New format: list of gateways
+                vol.Optional(CONF_GATEWAYS): vol.All(cv.ensure_list, [GATEWAY_SCHEMA]),
+                # Old format: single gateway (backward compatible)
                 vol.Optional(CONF_GATEWAY_IP, default=DEFAULT_GATEWAY_IP): cv.string,
                 vol.Optional(CONF_GATEWAY_PORT, default=DEFAULT_GATEWAY_PORT): cv.port,
             }
@@ -233,9 +247,6 @@ def setup(hass, config):
     """Set up the HDL AC Control integration."""
     conf = config.get(DOMAIN, {})
     
-    gateway_ip = conf.get(CONF_GATEWAY_IP, DEFAULT_GATEWAY_IP)
-    gateway_port = conf.get(CONF_GATEWAY_PORT, DEFAULT_GATEWAY_PORT)
-    
     # Find templates.json in integration directory
     integration_dir = Path(__file__).parent
     templates_path = integration_dir / TEMPLATES_FILE
@@ -245,18 +256,46 @@ def setup(hass, config):
         return False
     
     try:
-        # Create gateway instance
-        gateway = HdlGateway(gateway_ip, gateway_port, str(templates_path))
+        gateways = {}
         
-        # Start UDP listener for status broadcasts
-        gateway.start_listener()
+        # Check for new multi-gateway format
+        if CONF_GATEWAYS in conf:
+            _LOGGER.info("Using multi-gateway configuration")
+            for gw_conf in conf[CONF_GATEWAYS]:
+                subnet = gw_conf[CONF_SUBNET]
+                gateway_ip = gw_conf[CONF_GATEWAY_IP]
+                gateway_port = gw_conf.get(CONF_GATEWAY_PORT, DEFAULT_GATEWAY_PORT)
+                
+                _LOGGER.info(f"Initializing gateway for subnet {subnet}: {gateway_ip}:{gateway_port}")
+                
+                # Create gateway instance for this subnet
+                gateway = HdlGateway(gateway_ip, gateway_port, str(templates_path))
+                gateway.start_listener()
+                
+                gateways[subnet] = gateway
+        else:
+            # Backward compatibility: old single-gateway format
+            _LOGGER.info("Using legacy single-gateway configuration")
+            gateway_ip = conf.get(CONF_GATEWAY_IP, DEFAULT_GATEWAY_IP)
+            gateway_port = conf.get(CONF_GATEWAY_PORT, DEFAULT_GATEWAY_PORT)
+            
+            _LOGGER.info(f"Initializing single gateway: {gateway_ip}:{gateway_port}")
+            
+            # Create gateway instance
+            gateway = HdlGateway(gateway_ip, gateway_port, str(templates_path))
+            gateway.start_listener()
+            
+            # Store as default gateway (subnet None means any/all subnets)
+            gateways[None] = gateway
         
         # Store in hass.data for climate platform to access
         hass.data[DOMAIN] = {
-            "gateway": gateway,
+            "gateways": gateways,
+            # Keep "gateway" for backward compatibility with old configs
+            "gateway": gateways.get(None) or next(iter(gateways.values())),
         }
         
-        _LOGGER.info(f"HDL AC Control integration initialized successfully")
+        _LOGGER.info(f"HDL AC Control integration initialized successfully with {len(gateways)} gateway(s)")
         return True
         
     except Exception as e:

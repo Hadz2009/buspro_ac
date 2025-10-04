@@ -60,7 +60,9 @@ A native Home Assistant custom integration for controlling HDL BusPro AC units. 
 
 ## Configuration
 
-Add to your `configuration.yaml`:
+### Single Gateway Configuration
+
+For homes with one HDL gateway, add to your `configuration.yaml`:
 
 ```yaml
 # Configure the HDL gateway
@@ -80,14 +82,59 @@ climate:
         name: "Kitchen AC"
 ```
 
+### Multiple Gateway Configuration (v2.3.0+)
+
+For homes with multiple HDL gateways (e.g., one per floor), use the new multi-gateway format:
+
+```yaml
+# Configure multiple HDL gateways
+buspro_ac:
+  gateways:
+    - subnet: 1                  # Subnet ID for first floor
+      ip: 192.168.1.25
+      port: 6000
+    - subnet: 2                  # Subnet ID for second floor
+      ip: 192.168.1.26
+      port: 6000
+
+# Add your AC devices
+climate:
+  - platform: buspro_ac
+    devices:
+      - address: "1.14"          # First floor - uses gateway 192.168.1.25
+        name: "First Floor Living Room AC"
+      - address: "1.13"          # First floor - uses gateway 192.168.1.25
+        name: "First Floor Bedroom AC"
+      - address: "2.15"          # Second floor - uses gateway 192.168.1.26
+        name: "Second Floor Master Bedroom AC"
+      - address: "2.12"          # Second floor - uses gateway 192.168.1.26
+        name: "Second Floor Guest Room AC"
+```
+
+**How it works:** The integration automatically routes commands to the correct gateway based on the device's subnet. Devices with address `1.x` use the gateway configured for subnet 1, devices with address `2.x` use the gateway for subnet 2, and so on.
+
 ### Configuration Options
 
-**Integration Settings (`buspro_ac`):**
+**Integration Settings - Single Gateway (`buspro_ac`):**
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `gateway_ip` | No | `192.168.1.25` | IP address of your HDL gateway |
 | `gateway_port` | No | `6000` | UDP port for HDL communication |
+
+**Integration Settings - Multiple Gateways (`buspro_ac`):**
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `gateways` | Yes | N/A | List of gateway configurations (see Gateway Configuration below) |
+
+**Gateway Configuration (for multi-gateway setup):**
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `subnet` | Yes | N/A | Subnet ID that this gateway controls (1, 2, 3, etc.) |
+| `ip` | Yes | N/A | IP address of the gateway |
+| `port` | No | `6000` | UDP port for HDL communication |
 
 **Climate Platform (`climate`):**
 
@@ -293,7 +340,13 @@ The integration used optimistic state, where Home Assistant state only reflects 
 
 ## Changelog
 
-### v1.1.3 (Latest)
+### v2.3.0 (Latest)
+- ✨ **NEW**: Multi-gateway support! Control devices across multiple HDL gateways
+- 🏠 Automatic subnet-based routing - commands sent to correct gateway
+- 🔄 Backward compatible with single-gateway configurations
+- 🔧 Restored power button in Home Assistant UI (OFF mode in HVAC modes)
+
+### v1.1.3
 - ✨ **NEW**: Two-way communication! Real-time status updates when AC is changed from wall panels
 - 🎯 Automatic UDP broadcast listener for status updates
 - 📡 No polling required - instant state synchronization

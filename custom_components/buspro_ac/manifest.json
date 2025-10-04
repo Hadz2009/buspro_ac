@@ -1,7 +1,7 @@
 {
   "domain": "buspro_ac",
   "name": "HDL AC Control",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "documentation": "https://github.com/Hadz2009/buspro_ac",
   "issue_tracker": "https://github.com/Hadz2009/buspro_ac/issues",
   "requirements": [],

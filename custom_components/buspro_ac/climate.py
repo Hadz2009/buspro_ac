@@ -51,12 +51,12 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     """Set up HDL AC climate devices."""
     import asyncio
     
-    # Get gateway from hass.data
+    # Get gateways from hass.data
     if DOMAIN not in hass.data:
         _LOGGER.error("HDL AC Control integration not initialized")
         return False
     
-    gateway = hass.data[DOMAIN]["gateway"]
+    gateways = hass.data[DOMAIN]["gateways"]
     
     # Parse devices from config
     devices = config.get(CONF_DEVICES, [])
@@ -77,6 +77,20 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
             
             subnet = int(parts[0])
             device_id = int(parts[1])
+            
+            # Get the correct gateway for this subnet
+            if subnet in gateways:
+                gateway = gateways[subnet]
+                _LOGGER.info(f"Using subnet-specific gateway for {name} (subnet {subnet})")
+            elif None in gateways:
+                # Fallback to default gateway (legacy single-gateway config)
+                gateway = gateways[None]
+                _LOGGER.info(f"Using default gateway for {name} (subnet {subnet})")
+            else:
+                _LOGGER.error(
+                    f"No gateway configured for subnet {subnet}. Device: {name} ({address})"
+                )
+                continue
             
             # Create entity
             entity = HdlAcClimate(gateway, name, subnet, device_id)
@@ -106,13 +120,13 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
                     frame = build_status_request(
                         entity._subnet,
                         entity._device_id,
-                        gateway.protocol_schema
+                        entity._gateway.protocol_schema
                     )
                     
                     # Send request twice with delay to ensure it's received
-                    gateway.send_packet(frame)
+                    entity._gateway.send_packet(frame)
                     await asyncio.sleep(0.3)  # 300ms delay
-                    gateway.send_packet(frame)  # Send again for reliability
+                    entity._gateway.send_packet(frame)  # Send again for reliability
                     
                     _LOGGER.debug(f"✅ Status request sent for {entity.name}")
                     
@@ -180,9 +194,8 @@ class HdlAcClimate(ClimateEntity):
     @property
     def hvac_modes(self):
         """Return the list of available HVAC modes."""
-        # Only COOL and FAN modes - OFF is handled by separate power button
-        # Removing OFF from this list makes HA show a separate power toggle
-        return [HVACMode.COOL, HVACMode.FAN_ONLY]
+        # Include OFF to show power button in Home Assistant UI
+        return [HVACMode.OFF, HVACMode.COOL, HVACMode.FAN_ONLY]
 
     @property
     def supported_features(self):
@@ -235,17 +248,20 @@ class HdlAcClimate(ClimateEntity):
         return [FAN_AUTO, FAN_HIGH, FAN_MEDIUM, FAN_LOW]
 
     def set_hvac_mode(self, hvac_mode):
-        """Set new target HVAC mode (COOL or FAN only - power is separate)."""
-        if hvac_mode in [HVACMode.COOL, HVACMode.FAN_ONLY]:
+        """Set new target HVAC mode."""
+        if hvac_mode == HVACMode.OFF:
+            # Turn AC off
+            self.turn_off()
+        elif hvac_mode in [HVACMode.COOL, HVACMode.FAN_ONLY]:
             # Store the desired mode
             old_mode = self._hvac_mode
             self._hvac_mode = hvac_mode
             # If AC was already on (not OFF), apply the mode change immediately
-            if old_mode != HVACMode.OFF:
-                self.turn_on()
+            # If it was OFF, turn it on with the new mode
+            self.turn_on()
             _LOGGER.info(f"Set HVAC mode to {hvac_mode} for {self._name}")
         else:
-            _LOGGER.warning(f"Unsupported HVAC mode: {hvac_mode}. Use turn_on/turn_off for power control.")
+            _LOGGER.warning(f"Unsupported HVAC mode: {hvac_mode}")
     
     def set_temperature(self, **kwargs):
         """Set new target temperature."""
