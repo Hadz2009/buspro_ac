@@ -474,8 +474,8 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
     
     Type 0x19 Packet Structure (after AA AA 19):
     Position 0-1:  Device address (subnet, device_id)
+    Position 9:    ON/OFF indicator (0x00=OFF, 0x01=ON) - NOTE: Different from 0x18/0x1A!
     Position 10:   Target setpoint temperature (NOTE: Different from 0x18/0x1A!)
-    Position 15:   ON/OFF indicator
     Position 16:   Fan speed (0x00=AUTO, 0x01=HIGH, 0x02=MEDIUM, 0x03=LOW)
     Position 17:   HVAC mode (0x00=COOL, 0x02=FAN, 0x04=DRY)
     
@@ -575,12 +575,16 @@ def parse_status_packet(packet: bytes, schema: Dict) -> Dict:
         else:
             temperature = None  # Invalid range or not applicable
         
-        # Position 15: ON/OFF indicator
-        # 0x20 = OFF
-        # 0x01 = ON in COOL mode
-        # 0x21 = ON in FAN mode
-        on_off_byte = data_area[15]
-        is_on = (on_off_byte != 0x20)
+        # ON/OFF position varies by packet type:
+        # - Type 0x18: position 15 (0x20=OFF, 0x01=ON COOL, 0x21=ON FAN)
+        # - Type 0x19: position 9 (0x00=OFF, 0x01=ON)
+        # - Type 0x1A: position 15 (0x20=OFF, 0x01=ON COOL, 0x21=ON FAN)
+        if length == 0x19:
+            on_off_byte = data_area[9] if len(data_area) > 9 else 0x00
+            is_on = (on_off_byte == 0x01)
+        else:
+            on_off_byte = data_area[15]
+            is_on = (on_off_byte != 0x20)
         
         # Position 17: HVAC mode
         # 0x00 = COOL mode
