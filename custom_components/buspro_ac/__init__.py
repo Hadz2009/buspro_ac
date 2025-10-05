@@ -15,6 +15,8 @@ from .const import (
     CONF_GATEWAY_PORT,
     CONF_GATEWAYS,
     CONF_SUBNET,
+    CONF_IP,
+    CONF_PORT,
     DEFAULT_GATEWAY_IP,
     DEFAULT_GATEWAY_PORT,
     TEMPLATES_FILE,
@@ -27,8 +29,8 @@ _LOGGER = logging.getLogger(__name__)
 GATEWAY_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_SUBNET): cv.positive_int,
-        vol.Required(CONF_GATEWAY_IP): cv.string,
-        vol.Optional(CONF_GATEWAY_PORT, default=DEFAULT_GATEWAY_PORT): cv.port,
+        vol.Required(CONF_IP): cv.string,
+        vol.Optional(CONF_PORT, default=DEFAULT_GATEWAY_PORT): cv.port,
     }
 )
 
@@ -40,8 +42,8 @@ CONFIG_SCHEMA = vol.Schema(
                 # New format: list of gateways
                 vol.Optional(CONF_GATEWAYS): vol.All(cv.ensure_list, [GATEWAY_SCHEMA]),
                 # Old format: single gateway (backward compatible)
-                vol.Optional(CONF_GATEWAY_IP, default=DEFAULT_GATEWAY_IP): cv.string,
-                vol.Optional(CONF_GATEWAY_PORT, default=DEFAULT_GATEWAY_PORT): cv.port,
+                vol.Optional(CONF_GATEWAY_IP): cv.string,
+                vol.Optional(CONF_GATEWAY_PORT): cv.port,
             }
         )
     },
@@ -263,8 +265,8 @@ def setup(hass, config):
             _LOGGER.info("Using multi-gateway configuration")
             for gw_conf in conf[CONF_GATEWAYS]:
                 subnet = gw_conf[CONF_SUBNET]
-                gateway_ip = gw_conf[CONF_GATEWAY_IP]
-                gateway_port = gw_conf.get(CONF_GATEWAY_PORT, DEFAULT_GATEWAY_PORT)
+                gateway_ip = gw_conf[CONF_IP]
+                gateway_port = gw_conf.get(CONF_PORT, DEFAULT_GATEWAY_PORT)
                 
                 _LOGGER.info(f"Initializing gateway for subnet {subnet}: {gateway_ip}:{gateway_port}")
                 

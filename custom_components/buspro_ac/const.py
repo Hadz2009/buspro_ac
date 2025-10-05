@@ -7,6 +7,8 @@ CONF_GATEWAY_IP = "gateway_ip"
 CONF_GATEWAY_PORT = "gateway_port"
 CONF_GATEWAYS = "gateways"
 CONF_SUBNET = "subnet"
+CONF_IP = "ip"
+CONF_PORT = "port"
 CONF_DEVICES = "devices"
 CONF_ADDRESS = "address"
 
